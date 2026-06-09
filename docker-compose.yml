@@ -1,0 +1,30 @@
+services:
+  data-entry:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: data-entry-webapp:${IMAGE_TAG:-latest}
+    container_name: data-entry-webapp
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: ${PORT:-4000}
+      # Use system Chromium installed in the image (do not point at Windows paths).
+      PUPPETEER_EXECUTABLE_PATH: /usr/bin/chromium
+      DB_WAIT_ON_START: ${DB_WAIT_ON_START:-true}
+      # PDF printing via host CUPS — leave unset to use mounted /run/cups/cups.sock.
+      # If socket mount fails, set in .env: CUPS_SERVER=host.docker.internal:631
+      CUPS_SERVER: ${CUPS_SERVER:-}
+    ports:
+      - "${PORT:-4000}:${PORT:-4000}"
+    # Lets the container reach MySQL/SAP on the Docker host (Linux).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # PDF printing: share host CUPS runtime dir (do NOT mount only the socket file).
+    volumes:
+      - /run/cups:/run/cups:ro
+    # Host lp group GID — required to read cups.sock (run on host: getent group lp | cut -d: -f3)
+    group_add:
+      - "${CUPS_LP_GID:-7}"

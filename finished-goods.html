@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>VK Global Digital - Finished Goods Entry</title>
+    <meta name="description" content="VK Global Digital - Finished Goods data entry and QC approval">
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect fill='%2310b981' width='100' height='100' rx='20'/%3E%3Ctext x='50' y='65' font-family='Arial' font-size='45' font-weight='bold' fill='white' text-anchor='middle'%3EFG%3C/text%3E%3C/svg%3E">
+    <link rel="stylesheet" href="finished-goods.css">
+</head>
+
+<body>
+    <!-- Animated Background -->
+    <div class="background-animation"></div>
+
+    <!-- Header Bar -->
+    <header class="header-bar">
+        <div class="header-left">
+            <a href="index.html" class="back-button" id="back-button">
+                <span>←</span>
+            </a>
+            <div class="page-info">
+                <h1 class="page-title">📦 Finished Goods Entry</h1>
+                <span class="page-subtitle">QC Approval & Packing Details</span>
+            </div>
+        </div>
+        <div class="header-right">
+            <div class="current-time" id="current-time"></div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <div class="container">
+        <!-- Search Section -->
+        <div class="search-section">
+            <div class="search-card">
+                <div class="search-header">
+                    <span class="search-icon">🔍</span>
+                    <h2>Search Production Order</h2>
+                </div>
+                <div class="search-form">
+                    <div class="search-input-group">
+                        <input type="text" id="po-search-input" class="search-input" placeholder="Enter PO Number..." autocomplete="off">
+                        <button id="po-search-btn" class="search-btn">
+                            <span>Search</span>
+                        </button>
+                    </div>
+                    <div class="search-hint">Enter the Production Order number to load job details</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Loading Indicator -->
+        <div class="loading-section" id="loading-section" style="display: none;">
+            <div class="loading-spinner"></div>
+            <p>Loading production order details...</p>
+        </div>
+
+        <!-- Error Message -->
+        <div class="error-section" id="error-section" style="display: none;">
+            <div class="error-icon">❌</div>
+            <p class="error-message" id="error-message">Error loading production order</p>
+            <button class="retry-btn" id="retry-btn">Try Again</button>
+        </div>
+
+        <!-- Job Details & Form Section -->
+        <div class="job-section" id="job-section" style="display: none;">
+            <!-- Job Info Card -->
+            <div class="job-info-card">
+                <div class="job-header">
+                    <div class="job-badge">
+                        <span class="badge-icon">📋</span>
+                        <span class="badge-text">Production Order</span>
+                    </div>
+                    <div class="job-number" id="job-number">-</div>
+                </div>
+                <div class="job-details-grid">
+                    <div class="detail-item">
+                        <span class="detail-label">Customer Name</span>
+                        <span class="detail-value highlight" id="customer-name">-</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Item Code</span>
+                        <span class="detail-value" id="item-code">-</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Product Description</span>
+                        <span class="detail-value" id="product-description">-</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Planned Quantity</span>
+                        <span class="detail-value" id="planned-quantity">-</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Issued Quantity</span>
+                        <span class="detail-value highlight" id="issued-quantity">-</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Completed Quantity</span>
+                        <span class="detail-value" id="completed-quantity">-</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Remaining Quantity</span>
+                        <span class="detail-value highlight-warning" id="remaining-quantity">-</span>
+                    </div>
+                    <div class="detail-item">
+                        <span class="detail-label">Process Code</span>
+                        <span class="detail-value" id="process-code">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- FG Entry Form -->
+            <div class="fg-form-card">
+                <div class="form-header">
+                    <span class="form-icon">📝</span>
+                    <h2>Finished Goods Details</h2>
+                </div>
+                <form id="fg-entry-form" class="fg-form">
+                    <!-- FG Quantity -->
+                    <div class="form-group">
+                        <label for="fg-quantity" class="form-label">
+                            <span class="label-icon">📦</span>
+                            FG Quantity (Cartons) *
+                        </label>
+                        <input type="number" id="fg-quantity" name="fgQuantity" class="form-input" 
+                            placeholder="Enter finished goods quantity" min="1" required>
+                        <span class="input-hint">Number of finished cartons/units</span>
+                    </div>
+
+                    <!-- Packing Details -->
+                    <div class="form-group">
+                        <label for="packing-details" class="form-label">
+                            <span class="label-icon">📋</span>
+                            Packing Detail (Cartons/CFC) *
+                        </label>
+                        <input type="number" id="packing-details" name="packingDetails" class="form-input" 
+                            placeholder="Enter packing detail" min="1" required>
+                        <span class="input-hint">Number of Cartons/CFC</span>
+                    </div>
+
+                    <!-- QC Supervisor Selection -->
+                    <div class="form-group">
+                        <label for="qc-supervisor" class="form-label">
+                            <span class="label-icon">👤</span>
+                            QC Supervisor *
+                        </label>
+                        <select id="qc-supervisor" name="qcSupervisor" class="form-select" required>
+                            <option value="">-- Select QC Supervisor --</option>
+                            <option value="Amit">Amit</option>
+                            <option value="Aakash">Aakash</option>
+                            <option value="Jagdish">Jagdish</option>
+                            <option value="Mukesh">Mukesh</option>
+                            <option value="other">Other (Enter manually)</option>
+                        </select>
+                    </div>
+
+                    <!-- Other QC Supervisor Input (hidden by default) -->
+                    <div class="form-group" id="other-qc-group" style="display: none;">
+                        <label for="other-qc-supervisor" class="form-label">
+                            <span class="label-icon">✏️</span>
+                            Enter QC Supervisor Name *
+                        </label>
+                        <input type="text" id="other-qc-supervisor" name="otherQcSupervisor" class="form-input" 
+                            placeholder="Enter QC Supervisor name">
+                    </div>
+
+                    <!-- Operator (printed on label) -->
+                    <div class="form-group">
+                        <label for="operator-name" class="form-label">
+                            <span class="label-icon">🧑‍🔧</span>
+                            Operator *
+                        </label>
+                        <input type="text" id="operator-name" name="operatorName" class="form-input"
+                            placeholder="Enter operator name" required>
+                        <span class="input-hint">Label shows QC supervisor first name / operator first name</span>
+                    </div>
+
+                    <!-- Remarks (Optional) -->
+                    <div class="form-group">
+                        <label for="remarks" class="form-label">
+                            <span class="label-icon">💬</span>
+                            Remarks (Optional)
+                        </label>
+                        <textarea id="remarks" name="remarks" class="form-textarea" 
+                            placeholder="Any additional notes or comments..." rows="3"></textarea>
+                    </div>
+
+                    <!-- PKD Details (Optional) -->
+                    <div class="form-group">
+                        <label for="pkd-details" class="form-label">
+                            <span class="label-icon">📝</span>
+                            PKD Details (Optional)
+                        </label>
+                        <input type="text" id="pkd-details" name="pkdDetails" class="form-input" 
+                            placeholder="Enter PKD details...">
+                    </div>
+
+                    <!-- Submit Button -->
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" id="clear-form-btn">
+                            <span>🔄</span> Clear Form
+                        </button>
+                        <button type="submit" class="btn btn-primary" id="submit-btn">
+                            <span>✅</span> Submit FG Entry
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Success Message -->
+        <div class="success-section" id="success-section" style="display: none;">
+            <div class="success-card">
+                <div class="success-icon">✅</div>
+                <h2>FG Entry Submitted Successfully!</h2>
+                <div class="success-details" id="success-details"></div>
+                <div id="label-print-status-extra" class="label-print-status-extra" style="display: none;"></div>
+                <div class="success-actions">
+                    <button class="btn btn-secondary" id="print-labels-btn">
+                        <span>🖨️</span> Reprint Labels (<span id="label-count">0</span>)
+                    </button>
+                    <button class="btn btn-primary" id="new-entry-btn">
+                        <span>➕</span> New Entry
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Label Print Container (hidden, used for printing) -->
+    <div id="label-print-container" style="display: none;"></div>
+
+    <!-- Label preview before Zebra print (when FG_LABEL_PREVIEW_BEFORE_PRINT=true on server) -->
+    <div class="modal-overlay label-preview-modal-overlay" id="label-preview-modal" style="display: none;">
+        <div class="modal-content label-preview-modal-content">
+            <div class="modal-header">
+                <h3>🖨️ Preview label layout</h3>
+            </div>
+            <div class="modal-body label-preview-body">
+                <p class="label-preview-hint" id="label-preview-hint"></p>
+                <div id="label-preview-host" class="label-preview-host" aria-live="polite"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" id="label-preview-skip-btn">Skip print</button>
+                <button type="button" class="btn btn-secondary" id="label-preview-browser-print-btn">Print on this device</button>
+                <button type="button" class="btn btn-primary" id="label-preview-print-btn">Send to label printer</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirmation Modal -->
+    <div class="modal-overlay" id="confirm-modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>📦 Confirm FG Entry</h3>
+            </div>
+            <div class="modal-body" id="confirm-modal-body">
+                <!-- Confirmation details will be populated here -->
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="cancel-submit-btn">Cancel</button>
+                <button class="btn btn-primary" id="confirm-submit-btn">Confirm & Submit</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Rasterize label HTML to PNG on tablet (avoids SVG foreignObject incompatibilities) -->
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+    <script src="finished-goods.js?v=2026-06-03"></script>
+</body>
+
+</html>

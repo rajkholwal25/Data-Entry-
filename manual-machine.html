@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Manual Machine - Production Tracking</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect fill='%231e40af' width='100' height='100' rx='20'/%3E%3Ctext x='50' y='65' font-family='Arial' font-size='45' font-weight='bold' fill='white' text-anchor='middle'%3EVK%3C/text%3E%3C/svg%3E">
+    <link rel="stylesheet" href="manual-machine.css">
+</head>
+
+<body>
+    <!-- Header Banner -->
+    <header class="header-banner">
+        <div class="machine-badge" id="current-machine-badge">
+            <span class="machine-icon">⚙️</span>
+            <span class="machine-name" id="current-machine-name">MDC 1</span>
+        </div>
+        <div class="header-banner-actions">
+            <button type="button" class="reset-memory-btn" id="shift-logout-btn" title="Log out operator / end shift">
+                <span>🚪</span>
+                <span>End Shift</span>
+            </button>
+            <button type="button" class="reset-memory-btn" id="reset-memory-btn" title="Clear machine memory (PIN required)">
+                <span>🗑️</span>
+                <span>Reset</span>
+            </button>
+            <a href="index.html" class="home-btn" title="Back to Home">
+                <span>🏠</span>
+            </a>
+        </div>
+    </header>
+
+    <!-- Machine Navigation -->
+    <nav class="machine-nav">
+        <a href="?machine=manual-mdc-1" class="nav-btn" data-machine="manual-mdc-1">MDC 1</a>
+        <a href="?machine=manual-mdc-2" class="nav-btn" data-machine="manual-mdc-2">MDC 2</a>
+        <a href="?machine=manual-mdc-3" class="nav-btn" data-machine="manual-mdc-3">MDC 3</a>
+        <a href="?machine=manual-mdc-4" class="nav-btn" data-machine="manual-mdc-4">MDC 4</a>
+        <a href="?machine=manual-mf" class="nav-btn" data-machine="manual-mf">MF</a>
+    </nav>
+
+    <!-- Shift / Operator Info Bar -->
+    <section class="shift-info-bar" id="shift-info-bar">
+        <div class="shift-info-item">
+            <span class="si-label">Shift</span>
+            <span class="si-value" id="si-shift">-</span>
+        </div>
+        <div class="shift-info-item">
+            <span class="si-label">Operator</span>
+            <span class="si-value" id="si-operator">-</span>
+        </div>
+        <div class="shift-info-item">
+            <span class="si-label">Login at</span>
+            <span class="si-value" id="si-login-at">-</span>
+        </div>
+        <div class="shift-info-item">
+            <span class="si-label">Shift timer</span>
+            <span class="si-value si-timer" id="si-shift-timer">00:00:00</span>
+        </div>
+    </section>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- PO Input Section -->
+        <section class="po-section">
+            <div class="po-input-group">
+                <input type="text" id="po-input" class="po-input" placeholder="Enter PO Number..." autocomplete="off">
+                <button id="load-job-btn" class="load-btn">Load Job</button>
+            </div>
+        </section>
+
+        <!-- Job Details Card -->
+        <section class="job-card" id="job-card">
+            <div class="job-card-empty" id="job-empty-state">
+                <span class="empty-icon">📋</span>
+                <span class="empty-text">Enter PO number to load job details</span>
+            </div>
+            <div class="job-card-content" id="job-content" style="display: none;">
+                <div class="job-header">
+                    <span class="job-number" id="job-number">--</span>
+                    <span class="job-status" id="job-status">Loaded</span>
+                </div>
+                <div class="job-name" id="job-name">--</div>
+                <div class="job-stats">
+                    <div class="stat">
+                        <span class="stat-label">Planned</span>
+                        <span class="stat-value" id="job-planned">-</span>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">Issued</span>
+                        <span class="stat-value issued" id="job-issued">-</span>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">Done</span>
+                        <span class="stat-value done" id="job-done">-</span>
+                    </div>
+                    <div class="stat">
+                        <span class="stat-label">Remaining</span>
+                        <span class="stat-value remaining" id="job-remaining">-</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Assembly only: operator (free text) + same output fields as Finish Job, on-screen -->
+        <section id="assembly-workflow-section" class="assembly-workflow" style="display: none;" aria-hidden="true">
+            <h3 class="assembly-workflow-title">Report completion</h3>
+            <div class="form-row">
+                <div class="form-group half">
+                    <label for="assembly-start-time">Start time</label>
+                    <input type="time" id="assembly-start-time" class="assembly-input" step="60">
+                </div>
+                <div class="form-group half">
+                    <label for="assembly-end-time">End time</label>
+                    <input type="time" id="assembly-end-time" class="assembly-input" step="60">
+                </div>
+            </div>
+            <div class="form-group">
+                <label for="assembly-operator-name">Operator name *</label>
+                <input type="text" id="assembly-operator-name" class="assembly-input" autocomplete="name" placeholder="Enter operator name">
+            </div>
+            <div class="form-group">
+                <label for="assembly-sheets-processed">Quantity processed *</label>
+                <input type="number" id="assembly-sheets-processed" class="assembly-input" min="0" inputmode="numeric">
+            </div>
+            <div class="form-group">
+                <label for="assembly-wasted-sheets">Wasted *</label>
+                <input type="number" id="assembly-wasted-sheets" class="assembly-input" min="0" inputmode="numeric">
+            </div>
+            <div class="form-group">
+                <label for="assembly-finish-remarks">Remarks</label>
+                <textarea id="assembly-finish-remarks" class="assembly-input" rows="3" placeholder="Optional remarks..."></textarea>
+            </div>
+            <div class="assembly-workflow-actions">
+                <button type="button" class="btn-primary" id="assembly-continue-btn">Review &amp; submit</button>
+            </div>
+        </section>
+
+        <!-- Control Section -->
+        <section class="control-section">
+            <div class="control-buttons">
+                <button class="control-btn start-btn" id="btn-start" type="button" data-state="running" aria-label="Start" title="Start">
+                    <span class="btn-icon">▶️</span>
+                    <span class="btn-label" id="btn-start-label">Start</span>
+                </button>
+                <button class="control-btn breakdown-btn" id="btn-breakdown" data-state="downtime_mech">
+                    <span class="btn-icon">🔧</span>
+                    <span class="btn-label">Breakdown</span>
+                </button>
+                <button class="control-btn lunch-btn" id="btn-lunch" data-state="lunch">
+                    <span class="btn-icon">🍽️</span>
+                    <span class="btn-label">Lunch</span>
+                </button>
+                <button class="control-btn finish-btn" id="btn-finish">
+                    <span class="btn-icon">✅</span>
+                    <span class="btn-label">Finish</span>
+                </button>
+            </div>
+            <div class="timer-display">
+                <div class="timer-label">Time in Current State</div>
+                <div class="timer-value" id="timer-display">00:00:00</div>
+                <div class="timer-state" id="current-state-label">Not Started</div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Finish Job Modal -->
+    <div class="modal-overlay" id="finish-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Finish Job</h2>
+                <button class="modal-close" id="finish-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="finish-form">
+                    <div id="jumbled-job-section" style="display: none; margin-bottom: 12px;">
+                        <div style="padding: 10px 12px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; margin-bottom: 10px;">
+                            <div style="font-weight: 700; color: #1e40af; font-size: 0.9rem;">Jumbled job — multiple FG outputs on this sheet</div>
+                            <div style="font-size: 0.8rem; color: #475569; margin-top: 4px;">Enter sheets processed; quantities per FG are calculated automatically.</div>
+                        </div>
+                        <div id="fgLinesContainer" style="max-height: 180px; overflow-y: auto;"></div>
+                        <div id="fgLinesEmpty" style="display: none;"></div>
+                    </div>
+                    <div class="form-group">
+                        <label for="sheets-processed">Quantity Processed *</label>
+                        <input type="number" id="sheets-processed" min="0" required oninput="updateJumbledFGQuantities()">
+                    </div>
+                    <div class="form-group">
+                        <label for="wasted-sheets">Wasted Sheets *</label>
+                        <input type="number" id="wasted-sheets" min="0" required>
+                    </div>
+                    
+                    <!-- Wity / Witty-specific output fields -->
+                    <div id="wity-fields" style="display: none;">
+                        <h4 class="section-title">Wity Output Details</h4>
+                        <div class="form-row">
+                            <div class="form-group half">
+                                <label for="wity-quantity">Quantity *</label>
+                                <input type="number" id="wity-quantity" min="0" required>
+                            </div>
+                            <div class="form-group half">
+                                <label for="wity-length-mm">Length (in mm) *</label>
+                                <input type="number" id="wity-length-mm" min="0" step="0.01" required>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group half">
+                                <label for="wity-width-mm">Width (in mm) *</label>
+                                <input type="number" id="wity-width-mm" min="0" step="0.01" required>
+                            </div>
+                            <div class="form-group half">
+                                <label for="wity-mill">Mill *</label>
+                                <select id="wity-mill" required>
+                                    <option value="">-- Select Mill --</option>
+                                    <option value="ITC">ITC</option>
+                                    <option value="JK">JK</option>
+                                    <option value="Emami">Emami</option>
+                                    <option value="Century">Century</option>
+                                    <option value="Nimbo">Nimbo</option>
+                                    <option value="Imported">Imported</option>
+                                    <option value="Khanna">Khanna</option>
+                                    <option value="Siddharth">Siddharth</option>
+                                    <option value="Devpriya">Devpriya</option>
+                                    <option value="Magnum">Magnum</option>
+                                    <option value="Accurate">Accurate</option>
+                                    <option value="Vishal">Vishal</option>
+                                    <option value="Andhra">Andhra</option>
+                                    <option value="April Fine">April Fine</option>
+                                    <option value="Sheshashyee">Sheshashyee</option>
+                                    <option value="Bilt">Bilt</option>
+                                    <option value="Magno">Magno</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group half">
+                                <label for="wity-grade">Grade *</label>
+                                <select id="wity-grade" required>
+                                    <option value="">-- Select Grade --</option>
+                                    <option value="Pearl XL">Pearl XL</option>
+                                    <option value="Cyber XL">Cyber XL</option>
+                                    <option value="Cyber XB XL">Cyber XB XL</option>
+                                    <option value="Saphire">Saphire</option>
+                                    <option value="Carte Lumina">Carte Lumina</option>
+                                    <option value="Endura">Endura</option>
+                                    <option value="Ultima">Ultima</option>
+                                    <option value="Maxofold">Maxofold</option>
+                                    <option value="Prima Plus">Prima Plus</option>
+                                    <option value="Prima Fold">Prima Fold</option>
+                                    <option value="Omega">Omega</option>
+                                    <option value="FBB">FBB</option>
+                                    <option value="GBD">GBD</option>
+                                    <option value="SPR">SPR</option>
+                                    <option value="OGB">OGB</option>
+                                    <option value="AGB">AGB</option>
+                                    <option value="Classic">Classic</option>
+                                    <option value="Cyber">Cyber</option>
+                                    <option value="Pearl">Pearl</option>
+                                    <option value="LWC">LWC</option>
+                                    <option value="Optic">Optic</option>
+                                    <option value="WBD">WBD</option>
+                                    <option value="Magnum">Magnum</option>
+                                    <option value="Accurate">Accurate</option>
+                                    <option value="Vishal">Vishal</option>
+                                </select>
+                            </div>
+                            <div class="form-group half">
+                                <label for="wity-gsm">GSM *</label>
+                                <input type="number" id="wity-gsm" min="0" step="1" inputmode="numeric" required placeholder="Enter GSM">
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Narendra-specific fields -->
+                    <div id="narendra-fields" style="display: none;">
+                        <h4 class="section-title">Narendra Machine Details</h4>
+                        <div class="form-row">
+                            <div class="form-group half">
+                                <label for="nar-anilox">Anilox</label>
+                                <input type="text" id="nar-anilox" placeholder="Anilox">
+                            </div>
+                            <div class="form-group half">
+                                <label for="nar-rubber-mm">Rubber (in mm)</label>
+                                <input type="number" id="nar-rubber-mm" min="0" step="0.01" placeholder="Rubber in mm">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group half">
+                                <label for="nar-tunnel-temp">Tunnel Temperature</label>
+                                <input type="number" id="nar-tunnel-temp" min="0" step="0.1" placeholder="Tunnel temp">
+                            </div>
+                            <div class="form-group half">
+                                <label for="nar-nip-temp">Nip Temperature</label>
+                                <input type="number" id="nar-nip-temp" min="0" step="0.1" placeholder="Nip temp">
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="finish-remarks">Remarks</label>
+                        <textarea id="finish-remarks" rows="3" placeholder="Optional remarks..."></textarea>
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="btn-secondary" id="finish-cancel">Cancel</button>
+                        <button type="submit" class="btn-primary">Submit</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Job Summary Modal -->
+    <div class="modal-overlay" id="summary-modal">
+        <div class="modal-content modal-large">
+            <div class="modal-header">
+                <h2>Job Summary - <span id="summary-job-number"></span></h2>
+                <button class="modal-close" id="summary-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="summary-operator">
+                    <span class="operator-label">Operator:</span>
+                    <span class="operator-value" id="summary-operator-name">-</span>
+                </div>
+                <div class="summary-section">
+                    <h3>Time Breakdown</h3>
+                    <div class="time-breakdown">
+                        <div class="time-item">
+                            <span class="time-label">Running Time</span>
+                            <input type="text" id="summary-running-time" class="time-input" pattern="^([0-1]?[0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$" disabled>
+                        </div>
+                        <div class="time-item">
+                            <span class="time-label">Breakdown Time</span>
+                            <input type="text" id="summary-breakdown-time" class="time-input" disabled>
+                        </div>
+                        <div class="time-item">
+                            <span class="time-label">Lunch Time</span>
+                            <input type="text" id="summary-lunch-time" class="time-input" disabled>
+                        </div>
+                        <div class="time-item total">
+                            <span class="time-label">Total Time</span>
+                            <span class="time-value" id="summary-total-time">00:00:00</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="summary-section">
+                    <h3>Production Details</h3>
+                    <div class="production-details">
+                        <div class="detail-item">
+                            <span class="detail-label">Quantity Processed</span>
+                            <span class="detail-value" id="summary-qty-processed">-</span>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Wasted Sheets</span>
+                            <span class="detail-value" id="summary-wasted">-</span>
+                        </div>
+                    </div>
+                    <div id="summary-jumbled-section" style="display: none; margin-top: 12px; padding: 12px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px;">
+                        <h4 style="margin: 0 0 8px; font-size: 0.95rem; color: #1e40af;">Jumbled job — FG items</h4>
+                        <div id="summary-fg-lines"></div>
+                    </div>
+                    <div id="autoIssueResults" style="display: none; margin-top: 12px;"></div>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" id="summary-edit">Edit</button>
+                    <button type="button" class="btn-primary" id="summary-confirm">Confirm</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Machine Selection Popup (after job finish) -->
+    <div class="modal-overlay" id="machine-select-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Job Completed Successfully!</h2>
+            </div>
+            <div class="modal-body">
+                <p class="success-message">✅ Job has been submitted successfully.</p>
+                <p class="select-prompt">Select a machine to continue:</p>
+                <div class="machine-select-grid">
+                    <button class="machine-select-btn" data-machine="manual-mdc-1">
+                        <span class="machine-icon">⚙️</span>
+                        <span>MDC 1</span>
+                    </button>
+                    <button class="machine-select-btn" data-machine="manual-mdc-2">
+                        <span class="machine-icon">⚙️</span>
+                        <span>MDC 2</span>
+                    </button>
+                    <button class="machine-select-btn" data-machine="manual-mdc-3">
+                        <span class="machine-icon">⚙️</span>
+                        <span>MDC 3</span>
+                    </button>
+                    <button class="machine-select-btn" data-machine="manual-mdc-4">
+                        <span class="machine-icon">⚙️</span>
+                        <span>MDC 4</span>
+                    </button>
+                    <button class="machine-select-btn" data-machine="manual-mf">
+                        <span class="machine-icon">✨</span>
+                        <span>MF (Foiling)</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Breakdown Reason Modal -->
+    <div class="modal-overlay" id="breakdown-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Breakdown Reason</h2>
+                <button class="modal-close" id="breakdown-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="breakdown-form">
+                    <div class="form-group">
+                        <label>Breakdown Type</label>
+                        <div class="breakdown-type-btns">
+                            <button type="button" class="breakdown-type-btn active" data-type="downtime_mech">
+                                <span>🔧</span> Mechanical
+                            </button>
+                            <button type="button" class="breakdown-type-btn" data-type="downtime_elec">
+                                <span>⚡</span> Electrical
+                            </button>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="breakdown-reason">Reason *</label>
+                        <textarea id="breakdown-reason" rows="3" required placeholder="Describe the breakdown reason..."></textarea>
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="btn-secondary" id="breakdown-cancel">Cancel</button>
+                        <button type="submit" class="btn-primary">Confirm</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Operator Selection Modal -->
+    <div class="modal-overlay" id="operator-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>👤 Select Operator</h2>
+            </div>
+            <div class="modal-body">
+                <p class="operator-prompt">Please select the operator for this job:</p>
+                <div class="form-group">
+                    <label for="operator-select">Operator Name *</label>
+                    <select id="operator-select" class="operator-dropdown">
+                        <option value="">-- Select Operator --</option>
+                    </select>
+                </div>
+                <div class="form-group" id="other-operator-group" style="display: none;">
+                    <label for="other-operator-input">Enter Operator Name *</label>
+                    <input type="text" id="other-operator-input" placeholder="Enter operator name...">
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-primary" id="operator-confirm">Confirm</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Reset Memory PIN Modal -->
+    <div class="modal-overlay" id="reset-memory-modal">
+        <div class="modal-content modal-compact">
+            <div class="modal-header">
+                <h2>🔒 Reset Memory</h2>
+                <button type="button" class="modal-close" id="reset-memory-modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="reset-warning-text">This clears the loaded job, timers, and state for this machine on this device.</p>
+                <div class="form-group">
+                    <label for="reset-pin-input">Enter 4-digit PIN</label>
+                    <input type="password" id="reset-pin-input" maxlength="4" pattern="[0-9]*" inputmode="numeric" placeholder="••••" autocomplete="off">
+                    <span class="pin-error-message" id="pin-error-message"></span>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn-secondary" id="reset-memory-cancel">Cancel</button>
+                    <button type="button" class="btn-danger" id="reset-memory-confirm">Clear Memory</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loading-overlay">
+        <div class="loading-spinner"></div>
+        <span class="loading-text">Loading...</span>
+    </div>
+
+    <!-- Toast Notification -->
+    <div class="toast" id="toast">
+        <span class="toast-icon"></span>
+        <span class="toast-message"></span>
+    </div>
+
+    <script src="validation.js"></script>
+    <script src="jumbled-job.js"></script>
+    <script src="live-tracking.js"></script>
+    <script src="manual-machine.js"></script>
+</body>
+
+</html>
