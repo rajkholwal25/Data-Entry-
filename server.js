@@ -27,6 +27,7 @@ const {
     insertJobActivities,
     getActivitiesByBatchNum,
     getBatchesByPO,
+    getEmbossingQuantitiesByPO,
     getJobSummary,
     getShiftSummary,
     getActivitiesByMachineAndDate,
@@ -179,17 +180,51 @@ const sapHttpsAgent = new (require('https').Agent)({
     keepAlive: true,
     maxSockets: 10
 });
+const SAP_REQUEST_TIMEOUT_MS = parseInt(process.env.SAP_REQUEST_TIMEOUT_MS || '60000', 10);
 
 /** ManBtchNum cache — master data flag that rarely changes. 10-minute TTL avoids repeated SAP calls. */
 const batchManagedCache = new Map();
 const BATCH_MANAGED_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 
-/** In-memory cache for repeated SAP lookups (same session). 0 = disabled (real-time SAP). Set e.g. 300000 to cache 5 minutes. */
+/**
+ * In-memory cache for repeated SAP lookups (same session).
+ * Only static master/job data is cached here (customer name, job no, item UOM,
+ * OSCN substitute, target width) — live values like issued/completed quantity are
+ * always fetched fresh, so this never serves stale stock numbers.
+ * Default 5 minutes: makes repeat PO searches near-instant. Set 0 to disable.
+ */
 const SAP_LOOKUP_CACHE_TTL_MS = Math.max(
     0,
-    parseInt(process.env.SAP_LOOKUP_CACHE_TTL_MS || '0', 10) || 0
+    parseInt(process.env.SAP_LOOKUP_CACHE_TTL_MS || '300000', 10) || 0
 );
 const sapLookupCache = new Map();
+
+/**
+ * Some SAP systems don't expose U_CustName/U_CustCode UDFs on ProductionOrder, so the
+ * "extended select" 400s on every full PO load (two wasted round-trips before falling back).
+ * Once detected, remember it for the session and go straight to the base select.
+ */
+let poExtendedSelectUnsupported = false;
+
+/**
+ * SQL queries (by stable label) that failed with a structural error — missing table/column or
+ * no permission. These never recover within a session, yet the SQLQueries round-trip (POST + GET
+ * + DELETE) is slow, so re-running them on every new PO is a major drag. Once a label fails
+ * structurally we short-circuit it for the rest of the session.
+ */
+const sqlLabelsKnownUnsupported = new Set();
+function isStructuralSqlError(err) {
+    const status = err?.response?.status;
+    const code = err?.response?.data?.error?.code;
+    const msg = (err?.response?.data?.error?.message?.value || err?.message || '').toLowerCase();
+    return (
+        status === 400 &&
+        (code === 702 || code === 703 ||
+            msg.includes('not accessible') ||
+            msg.includes('not exist') ||
+            msg.includes('is invalid'))
+    );
+}
 
 function getSapLookupCache(key) {
     if (!SAP_LOOKUP_CACHE_TTL_MS) return undefined;
@@ -210,6 +245,29 @@ function setSapLookupCache(key, val) {
         const first = iter.next().value;
         if (first !== undefined) sapLookupCache.delete(first);
     }
+}
+
+/**
+ * Caps how long a single (uncached) enrichment lookup may block PO load.
+ * The 5 enrichment lookups run in parallel, so the slowest one decides total time;
+ * without this, one slow SAP query could stall a search for 10s+. On timeout we
+ * resolve with a safe fallback so the rest of the job still loads instantly.
+ */
+const ENRICH_LOOKUP_TIMEOUT_MS = parseInt(process.env.ENRICH_LOOKUP_TIMEOUT_MS || '4000', 10);
+
+function withLookupTimeout(promise, fallback, label) {
+    if (!ENRICH_LOOKUP_TIMEOUT_MS || ENRICH_LOOKUP_TIMEOUT_MS <= 0) return promise;
+    let timer;
+    const timeout = new Promise((resolve) => {
+        timer = setTimeout(() => {
+            console.warn(`   ⏱️ Enrichment lookup "${label}" exceeded ${ENRICH_LOOKUP_TIMEOUT_MS}ms — using fallback`);
+            resolve(fallback);
+        }, ENRICH_LOOKUP_TIMEOUT_MS);
+    });
+    return Promise.race([
+        Promise.resolve(promise).catch(() => fallback),
+        timeout
+    ]).finally(() => clearTimeout(timer));
 }
 
 // ==================== Label Printer Configuration ====================
@@ -2099,7 +2157,8 @@ async function authenticateSAP() {
                     'Content-Type': 'application/json'
                 },
                 // Disable SSL verification for self-signed certificates (adjust in production)
-                httpsAgent: sapHttpsAgent
+                httpsAgent: sapHttpsAgent,
+                timeout: SAP_REQUEST_TIMEOUT_MS
             }
         );
 
@@ -2148,7 +2207,8 @@ async function sapGetRequest(endpoint) {
         const response = await axios.get(`${SAP_BASE_URL}${endpoint}`, {
             headers,
             // Disable SSL verification for self-signed certificates
-            httpsAgent: sapHttpsAgent
+            httpsAgent: sapHttpsAgent,
+            timeout: SAP_REQUEST_TIMEOUT_MS
         });
 
         return response.data;
@@ -2166,7 +2226,8 @@ async function sapGetRequest(endpoint) {
 
             const retryResponse = await axios.get(`${SAP_BASE_URL}${endpoint}`, {
                 headers,
-                httpsAgent: sapHttpsAgent
+                httpsAgent: sapHttpsAgent,
+                timeout: SAP_REQUEST_TIMEOUT_MS
             });
 
             return retryResponse.data;
@@ -2190,6 +2251,12 @@ function getSAPRequestHeaders(sessionOverride) {
 }
 
 async function runSapSqlQuery(sqlText, label) {
+    // Short-circuit queries already known to fail structurally this session (missing table/column/permission).
+    if (label && sqlLabelsKnownUnsupported.has(label)) {
+        const skipErr = new Error(`SQL "${label}" skipped (known unsupported this session)`);
+        skipErr.sqlSkipped = true;
+        throw skipErr;
+    }
     const queryCode = `${label || 'Q'}_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
     try {
         await sapPostRequest('/SQLQueries', {
@@ -2199,6 +2266,12 @@ async function runSapSqlQuery(sqlText, label) {
         });
         const result = await sapGetRequest(`/SQLQueries('${queryCode}')/List`);
         return result?.value || [];
+    } catch (err) {
+        if (label && isStructuralSqlError(err)) {
+            sqlLabelsKnownUnsupported.add(label);
+            console.warn(`   ⏭️ SQL "${label}" unsupported on this SAP — skipping it for the rest of the session`);
+        }
+        throw err;
     } finally {
         // Fire-and-forget cleanup — don't block the response waiting for DELETE to finish.
         authenticateSAP().then(session => {
@@ -2269,6 +2342,7 @@ async function sapPostRequest(endpoint, data) {
             headers,
             // Disable SSL verification for self-signed certificates
             httpsAgent: sapHttpsAgent,
+            timeout: SAP_REQUEST_TIMEOUT_MS,
             // Ensure proper JSON serialization
             transformRequest: [(data) => JSON.stringify(data)],
             maxContentLength: Infinity,
@@ -2292,6 +2366,7 @@ async function sapPostRequest(endpoint, data) {
             const retryResponse = await axios.post(`${SAP_BASE_URL}${endpoint}`, data, {
                 headers,
                 httpsAgent: sapHttpsAgent,
+                timeout: SAP_REQUEST_TIMEOUT_MS,
                 transformRequest: [(data) => JSON.stringify(data)],
                 maxContentLength: Infinity,
                 maxBodyLength: Infinity
@@ -2340,6 +2415,7 @@ async function sapPatchRequest(endpoint, data, options = {}) {
         const response = await axios.patch(`${SAP_BASE_URL}${endpoint}`, data, {
             headers,
             httpsAgent: sapHttpsAgent,
+            timeout: SAP_REQUEST_TIMEOUT_MS,
             transformRequest: [(data) => JSON.stringify(data)]
         });
 
@@ -2358,6 +2434,7 @@ async function sapPatchRequest(endpoint, data, options = {}) {
             const retryResponse = await axios.patch(`${SAP_BASE_URL}${endpoint}`, data, {
                 headers,
                 httpsAgent: sapHttpsAgent,
+                timeout: SAP_REQUEST_TIMEOUT_MS,
                 transformRequest: [(data) => JSON.stringify(data)]
             });
 
@@ -2396,10 +2473,18 @@ async function getReceivingBinAbsEntry(warehouseCode, itemCode) {
         }
 
         const binRows = await runSapSqlQuery(
-            `SELECT T0."AbsEntry" AS "BinAbs" FROM OBIN T0 WHERE T0."WhsCode" = '${wh}' ORDER BY T0."BinCode"`,
+            `SELECT T0."AbsEntry" AS "BinAbs", T0."BinCode" AS "BinCode", T0."SysBin" AS "SysBin" FROM OBIN T0 WHERE T0."WhsCode" = '${wh}' ORDER BY T0."BinCode"`,
             'warehouse_bins'
         );
-        const first = binRows[0]?.BinAbs ?? binRows[0]?.binAbs;
+        // Skip the warehouse SYSTEM bin — receipts cannot be fully allocated to it,
+        // which is what triggers SAP error 1470000341 ("Fully allocate item ... to bin locations").
+        const isSystemBin = (r) => {
+            const sys = String(r?.SysBin ?? r?.sysBin ?? '').toUpperCase();
+            if (sys === 'Y' || sys === 'TYES') return true;
+            return String(r?.BinCode ?? r?.binCode ?? '').toUpperCase().includes('SYSTEM');
+        };
+        const usable = binRows.find((r) => !isSystemBin(r)) || binRows[0];
+        const first = usable?.BinAbs ?? usable?.binAbs;
         return first ? Number(first) : null;
     } catch (err) {
         console.warn(`   Bin lookup failed for ${wh}/${itemCode}:`, err.message);
@@ -3391,6 +3476,7 @@ function isUnit1AuxMaterialItemNo(itemNo) {
 /** Unit 1 machine ids (URL ?machine=...) — no SAP resource / running-cost tracking. */
 const UNIT1_MACHINE_IDS = new Set([
     'embossing-1', 'embossing-2', 'embossing-3',
+    'coating-1', 'coating-2', 'coating-3',
     'rewinding-1', 'rewinding-2',
     'slitting-1', 'slitting-2',
     'metallisation-1'
@@ -3506,13 +3592,20 @@ function isUnit1ProcessCode(uPCode) {
         u.includes('MET') || u.includes('MTL') || u.includes('COT');
 }
 
+/** Embossing only — chemical adds to done qty but not to RM issue/remaining. */
+function isEmbossingProcessCode(uPCode) {
+    const u = String(uPCode || '').toUpperCase();
+    if (u === 'EMB+P' || u.startsWith('DIE')) return false;
+    return u.includes('EMB');
+}
+
 function sumUnit1MaterialQuantities(lines, headerItemNo) {
     let planned = 0;
     let issued = 0;
     for (const line of lines || []) {
         if (!isUnit1MaterialIssueLine(line, headerItemNo)) continue;
         planned += Number(line.PlannedQuantity || 0);
-        issued += Number(line.IssuedQuantity || 0);
+        issued += Math.abs(Number(line.IssuedQuantity || 0));
     }
     return { planned, issued };
 }
@@ -4336,11 +4429,12 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
         };
 
         let sapData;
-        if (!enrichPO) {
-            // Lightweight loads (materialOnly=1 and/or enrich=0): skip U_CustName/U_CustCode on PO — one round-trip, no retry.
+        if (!enrichPO || poExtendedSelectUnsupported) {
+            // Lightweight loads (materialOnly=1 and/or enrich=0), or systems where the U_CustName/U_CustCode
+            // UDFs are known-unsupported: skip the extended select — one round-trip, no retry.
             const tFetchStart = Date.now();
             sapData = await tryFetchPO(selectPOBase);
-            console.log(`   ⏱️ PO fetch (base select, lightweight) took ${Date.now() - tFetchStart}ms`);
+            console.log(`   ⏱️ PO fetch (base select${enrichPO ? '' : ', lightweight'}) took ${Date.now() - tFetchStart}ms`);
         } else {
             try {
                 const tFetchStart = Date.now();
@@ -4349,7 +4443,8 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
             } catch (e) {
                 const msg = e?.response?.data?.error?.message?.value || e?.message || '';
                 if (msg.includes("Property 'U_CustName'") || msg.includes("Property 'U_CustCode'")) {
-                    console.warn('Production order U_CustName/U_CustCode not available; retrying without those fields');
+                    poExtendedSelectUnsupported = true;
+                    console.warn('Production order U_CustName/U_CustCode not available; skipping extended select for the rest of this session');
                     const tFetchStart = Date.now();
                     sapData = await tryFetchPO(selectPOBase);
                     console.log(`   ⏱️ PO fetch (base select) took ${Date.now() - tFetchStart}ms`);
@@ -4371,7 +4466,8 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
         console.log(`   Using Production Order DocumentNumber=${docNumber}, Series=${productionOrder.Series}, AbsoluteEntry=${productionOrder.AbsoluteEntry}`);
         const uPCode = productionOrder.U_PCode;
 
-        if (isUnit1ProcessCode(productionOrder.U_PCode)) {
+        // Read-only PO loads (search / refresh) must not PATCH SAP — strip resources only on full loads.
+        if (isUnit1ProcessCode(productionOrder.U_PCode) && !materialOnly) {
             try {
                 const stripResult = await removeUnit1ResourceLinesFromPO(productionOrder.AbsoluteEntry);
                 if (stripResult.removed > 0) {
@@ -4391,8 +4487,11 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
             let expectedPatterns = [];
             let processType = '';
 
-            if (processLower.includes('embossing')) {
-                expectedPatterns = ['EMB', 'COT'];
+            if (processLower.includes('coating')) {
+                expectedPatterns = ['COT'];
+                processType = 'Coating';
+            } else if (processLower.includes('embossing')) {
+                expectedPatterns = ['EMB'];
                 processType = 'Embossing';
             } else if (processLower.includes('rewinding')) {
                 expectedPatterns = ['REW'];
@@ -4756,6 +4855,8 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
             productionOrder.ItemNo
         );
         let localCompletedQuantity = 0;
+        let embossingRoleUsedQuantity = null;
+        let embossingChemicalUsedQuantity = null;
         let poLocallyReset = false;
         if (unit1Process) {
             issuedQuantity = matQty.issued;
@@ -4766,6 +4867,13 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
                     (sum, b) => sum + (parseInt(b.quantity_processed, 10) || 0),
                     0
                 );
+                if (isEmbossingProcessCode(productionOrder.U_PCode)) {
+                    const emb = await getEmbossingQuantitiesByPO(String(docNumber));
+                    if (emb.trackedBatches > 0) {
+                        embossingRoleUsedQuantity = emb.roleUsed;
+                        embossingChemicalUsedQuantity = emb.chemicalUsed;
+                    }
+                }
             } catch (localErr) {
                 console.warn(`⚠️ Could not load local batches for PO ${docNumber}:`, localErr.message);
             }
@@ -4815,14 +4923,14 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
             // Run independent lookups in parallel (was sequential — major latency on each PO load)
             const tEnrichStart = Date.now();
             [itemCodeLabel, customerNameByFirm, jobNoResolved, customerNameResolved, inventoryUOM] = await Promise.all([
-                fetchOscnSubstitute(productionOrder.ItemNo),
-                fetchCustomerNameFromOITM_OMRC(productionOrder.ItemNo),
-                fetchJobNoFromUJobEnt(productionOrder.U_JobEnt),
-                fetchCustomerNameFromProductionOrder(productionOrder),
-                fetchItemInventoryUOM(productionOrder.ItemNo)
+                withLookupTimeout(fetchOscnSubstitute(productionOrder.ItemNo), '', 'oscnSubstitute'),
+                withLookupTimeout(fetchCustomerNameFromOITM_OMRC(productionOrder.ItemNo), '', 'customerByFirm'),
+                withLookupTimeout(fetchJobNoFromUJobEnt(productionOrder.U_JobEnt), '', 'jobNo'),
+                withLookupTimeout(fetchCustomerNameFromProductionOrder(productionOrder), customerNameResolved, 'customerName'),
+                withLookupTimeout(fetchItemInventoryUOM(productionOrder.ItemNo), '', 'inventoryUOM')
             ]);
             console.log(`   ⏱️ Enrichment lookups took ${Date.now() - tEnrichStart}ms`);
-        } else {
+        } else if (!materialOnly) {
             if (!customerNameResolved) {
                 customerNameResolved = await fetchCustomerNameFromProductionOrder(productionOrder);
             }
@@ -4830,21 +4938,26 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
         }
 
         let customerCodeResolved = poCustomerFields.code || productionOrder.U_CustCode || '';
-        if (!customerCodeResolved && productionOrder.U_JobEnt) {
+        if (!materialOnly && !customerCodeResolved && productionOrder.U_JobEnt) {
             const omjdCust = await fetchCustomerFromOmjdJob(productionOrder.U_JobEnt);
             customerCodeResolved = omjdCust.code || '';
         }
 
-        // Target produced width (mm) for first-process RM issue estimate.
-        // Cached + best-effort; safe to run in lightweight/material-only loads (issue dialog needs it).
+        // Target width: skip on lightweight PO reads (operator enters width in issue dialog).
         let targetWidth = null;
-        try {
-            targetWidth = await fetchProductionOrderTargetWidth(
-                productionOrder.AbsoluteEntry,
-                productionOrder.ItemNo
-            );
-        } catch (twErr) {
-            console.warn('⚠️ Target width lookup failed:', twErr.message);
+        if (!materialOnly) {
+            try {
+                targetWidth = await withLookupTimeout(
+                    fetchProductionOrderTargetWidth(
+                        productionOrder.AbsoluteEntry,
+                        productionOrder.ItemNo
+                    ),
+                    null,
+                    'targetWidth'
+                );
+            } catch (twErr) {
+                console.warn('⚠️ Target width lookup failed:', twErr.message);
+            }
         }
 
         // Map SAP response to job card format
@@ -4861,6 +4974,8 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
             issuedQuantity: issuedQuantity,        // Unit1: RM issued KGS; Unit2 DIE: sheets on product lines
             materialIssuedQuantity: matQty.issued,
             materialPlannedQuantity: matQty.planned,
+            embossingRoleUsedQuantity,
+            embossingChemicalUsedQuantity,
             uPCode: productionOrder.U_PCode,
             uJobEnt: productionOrder.U_JobEnt,  // For auto-issue linking
             targetWidth: targetWidth,  // mm — produced roll width (OWOR.U_Width / OITM.U_Width), for FBD-RM issue estimate

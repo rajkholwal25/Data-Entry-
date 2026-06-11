@@ -193,13 +193,27 @@
                 <form id="finish-job-form">
                     <!-- Standard Fields -->
                     <div id="standard-fields">
-                        <div class="form-group">
+                        <div id="embossing-fields" style="display: none;">
+                            <div class="form-group">
+                                <label for="embossing-role-used">Role Used (KGS) *</label>
+                                <input type="number" id="embossing-role-used" name="embossingRoleUsed" min="0" step="any">
+                                <small class="form-hint">Film/role RM consumed (remaining = issued − total role used)</small>
+                            </div>
+                            <div class="form-group">
+                                <label for="embossing-chemical-used">Chemical Used (KGS) *</label>
+                                <input type="number" id="embossing-chemical-used" name="embossingChemicalUsed" min="0" step="any" value="0">
+                                <small class="form-hint">Coating weight used — not issued separately in SAP</small>
+                            </div>
+                        </div>
+                        <div class="form-group" id="sheets-processed-group">
                             <label for="sheets-processed">Quantity Processed (KGS) *</label>
                             <input type="number" id="sheets-processed" name="sheetsProcessed" min="0" step="any">
+                            <small class="form-hint" id="sheets-processed-hint" style="display: none;">Actual quantity produced this batch (posted to SAP)</small>
                         </div>
-                        <div class="form-group">
-                            <label for="wasted-sheets">Wasted Quantity (KGS) *</label>
+                        <div class="form-group" id="wasted-sheets-group">
+                            <label for="wasted-sheets" id="wasted-sheets-label">Wasted Quantity (KGS) *</label>
                             <input type="number" id="wasted-sheets" name="wastedSheets" min="0" step="any">
+                            <small class="form-hint" id="wasted-sheets-hint" style="display: none;">Auto: (Role + Chemical) − Actual Output</small>
                         </div>
                     </div>
                     
@@ -254,13 +268,24 @@
                 <div class="summary-section">
                     <h3 class="summary-section-title">Production Details</h3>
                     <form id="job-summary-form">
+                        <div id="summary-embossing-fields" style="display: none;">
+                            <div class="form-group">
+                                <label for="summary-embossing-role-used">Role Used (KGS) *</label>
+                                <input type="number" id="summary-embossing-role-used" name="embossingRoleUsed" min="0" step="any" disabled>
+                            </div>
+                            <div class="form-group">
+                                <label for="summary-embossing-chemical-used">Chemical Used (KGS) *</label>
+                                <input type="number" id="summary-embossing-chemical-used" name="embossingChemicalUsed" min="0" step="any" disabled>
+                            </div>
+                        </div>
                         <div class="form-group" id="summary-sheets-group">
                             <label for="summary-sheets-processed" id="summary-sheets-label">Quantity Processed (KGS) *</label>
                             <input type="number" id="summary-sheets-processed" name="sheetsProcessed" required min="0" step="any" disabled>
                         </div>
                         <div class="form-group" id="summary-wasted-group">
-                            <label for="summary-wasted-sheets">Wasted Quantity (KGS) *</label>
+                            <label for="summary-wasted-sheets" id="summary-wasted-label">Wasted Quantity (KGS) *</label>
                             <input type="number" id="summary-wasted-sheets" name="wastedSheets" required min="0" disabled>
+                            <small class="form-hint" id="summary-wasted-hint" style="display: none;">Auto: (Role + Chemical) − Actual Output</small>
                         </div>
                         <div class="form-group" id="summary-speed-group">
                             <label id="summary-speed-label">Machine Speed</label>

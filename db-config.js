@@ -99,6 +99,8 @@ async function ensureSchema() {
             job_start_time             TIMESTAMP,
             job_end_time               TIMESTAMP,
             quantity_processed         INTEGER DEFAULT 0,
+            role_quantity_used         NUMERIC,
+            chemical_quantity_used     NUMERIC,
             speed_impressions_per_hour NUMERIC DEFAULT 0,
             sheets_wasted              INTEGER DEFAULT 0,
             remark                     TEXT,
@@ -136,6 +138,16 @@ async function ensureSchema() {
         console.warn('⚠️ batch_num column widen failed:', err.message);
     }
 
+    for (const col of ['role_quantity_used', 'chemical_quantity_used']) {
+        try {
+            await pool.query(
+                `ALTER TABLE production_records ADD COLUMN IF NOT EXISTS ${col} NUMERIC`
+            );
+        } catch (err) {
+            console.warn(`⚠️ Could not add column ${col}:`, err.message);
+        }
+    }
+
     await pool.query(`
         CREATE OR REPLACE VIEW vw_batch_summary AS
         SELECT batch_num,
@@ -149,6 +161,8 @@ async function ensureSchema() {
                MAX(job_end_time)         AS job_end,
                MAX(planned_qty)          AS planned_qty,
                MAX(quantity_processed)   AS quantity_processed,
+               MAX(role_quantity_used)   AS role_quantity_used,
+               MAX(chemical_quantity_used) AS chemical_quantity_used,
                SUM(sheets_wasted)        AS total_sheets_wasted,
                SUM(activity_time_minutes) AS total_minutes,
                COUNT(*)                  AS activity_count
@@ -417,10 +431,11 @@ async function insertActivityRecord(data) {
         const query = `
             INSERT INTO production_records 
             (batch_num, po_num, fg_num, job_name, operator_name, shift_type, machine_name, 
-             process_name, planned_qty, job_start_time, job_end_time, quantity_processed, 
+             process_name, planned_qty, job_start_time, job_end_time, quantity_processed,
+             role_quantity_used, chemical_quantity_used,
              speed_impressions_per_hour, sheets_wasted, remark,
              activity_name, activity_time_minutes, device_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING unique_id AS "insertId"
         `;
 
@@ -437,6 +452,8 @@ async function insertActivityRecord(data) {
             data.job_start_time || null,
             data.job_end_time || null,
             data.quantity_processed || 0,
+            data.role_quantity_used ?? null,
+            data.chemical_quantity_used ?? null,
             data.speed_impressions_per_hour || 0,
             data.sheets_wasted || 0,
             data.remark || null,
@@ -493,6 +510,8 @@ async function insertJobActivities(jobData, activities) {
             jobData.job_start_time || null,
             jobData.job_end_time || null,
             jobData.quantity_processed || 0,
+            jobData.role_quantity_used ?? null,
+            jobData.chemical_quantity_used ?? null,
             jobData.speed_impressions_per_hour || 0,
             jobData.sheets_wasted || 0,
             jobData.remark || null,
@@ -505,7 +524,7 @@ async function insertJobActivities(jobData, activities) {
             return { batch_num: batchNum, inserted: 0 };
         }
 
-        const COLS = 18;
+        const COLS = 20;
         const placeholders = rows
             .map(() => `(${new Array(COLS).fill('?').join(', ')})`)
             .join(', ');
@@ -513,7 +532,8 @@ async function insertJobActivities(jobData, activities) {
         const query = `
             INSERT INTO production_records 
             (batch_num, po_num, fg_num, job_name, operator_name, shift_type, machine_name, 
-             process_name, planned_qty, job_start_time, job_end_time, quantity_processed, 
+             process_name, planned_qty, job_start_time, job_end_time, quantity_processed,
+             role_quantity_used, chemical_quantity_used,
              speed_impressions_per_hour, sheets_wasted, remark,
              activity_name, activity_time_minutes, device_id)
             VALUES ${placeholders}
@@ -554,6 +574,30 @@ async function getBatchesByPO(poNum) {
         return rows;
     } catch (error) {
         console.error('Error fetching batches:', error);
+        throw error;
+    }
+}
+
+/** Cumulative embossing role/chemical from local batches (role drives RM remaining). */
+async function getEmbossingQuantitiesByPO(poNum) {
+    try {
+        const [rows] = await pool.query(
+            `SELECT
+                COALESCE(SUM(role_quantity_used), 0)     AS role_used,
+                COALESCE(SUM(chemical_quantity_used), 0) AS chemical_used,
+                COUNT(*) FILTER (WHERE role_quantity_used IS NOT NULL) AS tracked_batches
+             FROM vw_batch_summary
+             WHERE po_num = ?`,
+            [poNum]
+        );
+        const row = rows[0] || {};
+        return {
+            roleUsed: Number(row.role_used) || 0,
+            chemicalUsed: Number(row.chemical_used) || 0,
+            trackedBatches: Number(row.tracked_batches) || 0
+        };
+    } catch (error) {
+        console.error('Error fetching embossing quantities:', error);
         throw error;
     }
 }
@@ -1040,6 +1084,7 @@ module.exports = {
     insertJobActivities,
     getActivitiesByBatchNum,
     getBatchesByPO,
+    getEmbossingQuantitiesByPO,
     getJobSummary,
     getShiftSummary,
     getActivitiesByMachineAndDate,
