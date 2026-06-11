@@ -22,6 +22,7 @@ const execFileAsync = (cmd, args, opts = {}) =>
         });
     });
 const {
+    pool,
     testConnection,
     insertJobActivities,
     getActivitiesByBatchNum,
@@ -31,7 +32,19 @@ const {
     getActivitiesByMachineAndDate,
     updateBatchActivities,
     getBestPerformance,
-    getBatchNum
+    getBatchNum,
+    inferUnit1ProcessTagFromItemCode,
+    getUnit1ProcessBatchTag,
+    parseUnit1BatchSeq,
+    deleteRecordsByPO,
+    clearPOLocalReset,
+    isPOLocallyReset,
+    findRecentDuplicateJobCompletion,
+    recordMaterialIssues,
+    recordMaterialIssueIfAbsent,
+    linkOutputBatchToIssues,
+    getTraceabilityByPO,
+    getTraceabilityByOutputBatch
 } = require('./db-config');
 
 // Live tracking (operator shift sessions + live machine status/state)
@@ -49,9 +62,6 @@ const {
 
 const path = require('path');
 const fs = require('fs');
-
-// Import Prinect routes
-const { setupPrinectRoutes } = require('./prinect-routes');
 
 const app = express();
 // Some endpoints (e.g., rendered label printing) legitimately send large payloads.
@@ -73,15 +83,13 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// Setup Prinect routes
-setupPrinectRoutes(app);
-
 // SAP Business One Configuration
 const SAP_BASE_URL = process.env.SAP_BASE_URL || 'https://192.168.3.6:50000/b1s/v1';
 const SAP_COMPANY_DB = process.env.SAP_COMPANY_DB || 'VKFINALLIVE';
 const SAP_USERNAME = process.env.SAP_USERNAME || 'manager';
 const SAP_PASSWORD = process.env.SAP_PASSWORD || '8686';
 const SAP_POSTING_DATE = process.env.SAP_POSTING_DATE || '';
+const SAP_BPL_ID = Number(process.env.SAP_BPL_ID || 1);
 const PORT = process.env.PORT || 4000;
 
 // Label printing mode:
@@ -253,15 +261,16 @@ function extractBarcodeValue(labelData) {
     return (labelData?.fgCode || '').toString().trim().toUpperCase();
 }
 
-/** Quantity for a single box label; last box may be less than packing quantity. */
-function getBoxQuantity(boxNum, totalBoxes, data) {
-    const packingQty = Number(data?.quantity) || 0;
-    if (!packingQty) return '';
-    if (boxNum < totalBoxes) return packingQty;
-    const totalQty = Number(data?.totalQuantity);
-    if (!Number.isFinite(totalQty) || totalQty <= 0) return packingQty;
-    const remainder = totalQty - (totalBoxes - 1) * packingQty;
-    return remainder > 0 ? remainder : packingQty;
+/** FG label quantity (Unit 1): total produced qty in inventory UOM (e.g. KGS). */
+function getLabelQuantityLabel(data) {
+    const uom = (data?.inventoryUOM || data?.uom || 'KGS').toString().trim();
+    return uom ? `Quantity (${uom})` : 'Quantity';
+}
+
+function getLabelQuantityValue(data) {
+    const qty = Number(data?.quantity ?? data?.totalQuantity ?? data?.fgQuantity);
+    if (!Number.isFinite(qty) || qty <= 0) return '';
+    return String(qty);
 }
 
 function buildCode39BarSegments(value) {
@@ -336,7 +345,8 @@ function buildBarcodeCellHtml(labelData, options = {}) {
     const barcodeGraphic = useNative
         ? '<div class="barcode-placeholder" aria-hidden="true"></div>'
         : (barcodeValue ? renderCode39Svg(barcodeValue) : '');
-    const humanText = `<div class="code-text">${escapeHtml(itemCodeLabelRaw)}</div>`;
+    const displayCode = itemCodeLabelRaw || (labelData?.fgCode || '').toString().trim();
+    const humanText = `<div class="code-text">${escapeHtml(displayCode)}</div>`;
     return `
             <div class="btitle">ItemCode</div>
             <div class="barcode-wrap">${barcodeGraphic}${humanText}</div>`;
@@ -446,8 +456,8 @@ function generateZPLLabel(data, boxNum, totalBoxes) {
 ^FO${mapFO(8,70)}^A0N,26,26^FDJob No^FS
 ^FO${mapFO(38,70)}^A0N,32,32^FD${jobNo}^FS
 
-^FO${mapFO(8,80)}^A0N,26,26^FDQuantity^FS
-^FO${mapFO(38,80)}^A0N,32,32^FD${getBoxQuantity(boxNum, totalBoxes, data)}^FS
+^FO${mapFO(8,80)}^A0N,26,26^FD${truncate(getLabelQuantityLabel(data), 22)}^FS
+^FO${mapFO(38,80)}^A0N,32,32^FD${truncate(getLabelQuantityValue(data), 16)}^FS
 
 ^FO${mapFO(8,90)}^A0N,26,26^FDPacked On^FS
 ^FO${mapFO(38,90)}^A0N,32,32^FD${data.packedOn || ''}^FS
@@ -455,15 +465,12 @@ function generateZPLLabel(data, boxNum, totalBoxes) {
 ^FO${mapFO(8,100)}^A0N,26,26^FDOperator^FS
 ^FO${mapFO(38,100)}^A0N,32,32^FD${operator}^FS
 
-^FX --- Right block (barcode + box/batch) ---
+^FX --- Right block (barcode + batch) ---
 ^FO${mapFO(95,60)}^A0N,26,26^FDItemCode^FS
 ^FO${mapFO(95,66)}^BY3,2,90^B3N,N,90,Y,N^FD${barcodeText}^FS
 
-^FO${mapFO(95,84)}^A0N,26,26^FDBox No^FS
-^FO${mapFO(122,84)}^A0N,32,32^FD${boxNum}/${totalBoxes}^FS
-
-^FO${mapFO(95,94)}^A0N,26,26^FDBatch No^FS
-^FO${mapFO(122,94)}^A0N,32,32^FD${batchNo}^FS
+^FO${mapFO(95,90)}^A0N,26,26^FDBatch No^FS
+^FO${mapFO(122,90)}^A0N,32,32^FD${batchNo}^FS
 
 ^XZ
 `;
@@ -688,6 +695,208 @@ async function fetchCustomerNameFromOITM_OMRC(itemCode) {
     }
 }
 
+/** Customer name/code from Production Order header UDFs (when present on SL response). */
+function pickPoCustomerFields(productionOrder) {
+    if (!productionOrder || typeof productionOrder !== 'object') {
+        return { name: '', code: '' };
+    }
+    const name = pickFirstNonEmpty(
+        productionOrder.U_CustName,
+        productionOrder.u_CustName,
+        productionOrder.U_CUSTNAME,
+        productionOrder.U_Custname
+    );
+    const code = pickFirstNonEmpty(
+        productionOrder.U_CustCode,
+        productionOrder.u_CustCode,
+        productionOrder.U_CUSTCODE,
+        productionOrder.U_Custcode
+    );
+    return { name: name || '', code: code || '' };
+}
+
+/** Customer name from OMJD line collection: PO.U_JobEnt → OMJD → MJD1.U_PrNa */
+function pickCustomerNameFromOmjd(doc) {
+    const lines = doc?.MJD1Collection || doc?.mjd1Collection || [];
+    if (!Array.isArray(lines)) return '';
+    for (const line of lines) {
+        const name = pickFirstNonEmpty(line.U_PrNa, line.u_PrNa, line.U_PRNA);
+        if (name) return name;
+    }
+    return '';
+}
+
+/** First non-empty sales-order doc num from OMJD MJD1 lines (U_SoNo). */
+function pickSoDocNumFromOmjd(doc) {
+    const lines = doc?.MJD1Collection || doc?.mjd1Collection || [];
+    if (!Array.isArray(lines)) return '';
+    for (const line of lines) {
+        const soNo = pickFirstNonEmpty(line.U_SoNo, line.u_SoNo, line.U_SONO);
+        if (soNo) return soNo;
+    }
+    return '';
+}
+
+/**
+ * PO.U_JobEnt → OMJD (Service Layer) → MJD1.U_PrNa (+ optional ORDR.CardCode via MJD1.U_SoNo).
+ */
+async function fetchCustomerFromOmjdJob(uJobEnt) {
+    const docEntry = Number((uJobEnt || '').toString().trim());
+    if (!Number.isFinite(docEntry) || docEntry <= 0) {
+        return { name: '', code: '' };
+    }
+
+    const cacheKey = `omjdcust:${docEntry}`;
+    const cached = getSapLookupCache(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const tryFetchJobDoc = async (entity) => {
+        try {
+            return await sapGetRequest(`/${entity}(${docEntry})?$select=DocEntry,MJD1Collection`);
+        } catch {
+            return null;
+        }
+    };
+
+    const doc = (await tryFetchJobDoc('OMJD'))
+        || (await tryFetchJobDoc('ORJD'))
+        || (await tryFetchJobDoc('OCJD'));
+
+    const name = pickCustomerNameFromOmjd(doc);
+    let code = '';
+
+    const soDocNum = Number(pickSoDocNumFromOmjd(doc));
+    if (Number.isFinite(soDocNum) && soDocNum > 0) {
+        try {
+            const rows = await runSapSqlQuery(
+                `SELECT T0."CardCode" FROM ORDR T0 WHERE T0."DocNum" = ${soDocNum}`,
+                'ORDR_CardCode'
+            );
+            code = pickFirstNonEmpty(rows?.[0]?.CardCode, rows?.[0]?.cardCode) || '';
+        } catch {
+            try {
+                const ord = await sapGetRequest(
+                    `/Orders?$select=CardCode&$filter=DocNum eq ${soDocNum}&$top=1`
+                );
+                code = pickFirstNonEmpty(ord?.value?.[0]?.CardCode) || '';
+            } catch {
+                // SO lookup optional
+            }
+        }
+    }
+
+    const result = { name: name || '', code: code || '' };
+    setSapLookupCache(cacheKey, result);
+    return result;
+}
+
+/**
+ * Resolve customer name for a production order (FG labels, finished-goods page).
+ * Priority: PO U_CustName → OMJD MJD1.U_PrNa (via U_JobEnt) → OWOR SQL → OITM FirmName fallback.
+ */
+async function fetchCustomerNameFromProductionOrder(productionOrder) {
+    const fromPo = pickPoCustomerFields(productionOrder);
+    if (fromPo.name) return fromPo.name;
+
+    const absEntry = Number(productionOrder?.AbsoluteEntry);
+    const jobEnt = Number(productionOrder?.U_JobEnt);
+    const cacheKey = `pocustname:${Number.isFinite(absEntry) ? absEntry : 'x'}:${Number.isFinite(jobEnt) ? jobEnt : 'x'}`;
+    const cached = getSapLookupCache(cacheKey);
+    if (cached !== undefined) return cached;
+
+    if (Number.isFinite(jobEnt) && jobEnt > 0) {
+        const fromOmjd = await fetchCustomerFromOmjdJob(jobEnt);
+        if (fromOmjd.name) {
+            setSapLookupCache(cacheKey, fromOmjd.name);
+            return fromOmjd.name;
+        }
+    }
+
+    if (Number.isFinite(absEntry) && absEntry > 0) {
+        try {
+            const rows = await runSapSqlQuery(
+                `SELECT T0."U_CustName", T0."U_CustCode" FROM OWOR T0 WHERE T0."DocEntry" = ${absEntry}`,
+                'OWOR_CustName'
+            );
+            const row = rows?.[0];
+            const name = pickFirstNonEmpty(
+                row?.U_CustName, row?.u_CustName, row?.Name, row?.NAME
+            );
+            if (name) {
+                setSapLookupCache(cacheKey, name);
+                return name;
+            }
+        } catch {
+            // UDF may not exist on OWOR in this SAP
+        }
+    }
+
+    setSapLookupCache(cacheKey, '');
+    return '';
+}
+
+/**
+ * Fetch the target produced width (mm) for a production order.
+ * Tries the Production Order header UDF (OWOR.U_Width) first, then falls back to the
+ * output item master (OITM.U_Width). Returns a positive number or null when unavailable.
+ * Used by the first-process (FBD-RM) RM issue dialog to estimate produced qty after slitting.
+ */
+async function fetchProductionOrderTargetWidth(absoluteEntry, itemCode) {
+    const absEntry = Number(absoluteEntry);
+    const code = (itemCode || '').toString().trim();
+    const cacheKey = `powidth:${Number.isFinite(absEntry) ? absEntry : 'x'}:${code}`;
+    const cached = getSapLookupCache(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const toPositiveNumber = (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) && n > 0 ? n : null;
+    };
+    const pickWidth = (row) => {
+        if (!row || typeof row !== 'object') return null;
+        const candidates = ['U_Width', 'u_width', 'U_WIDTH', 'Width', 'width'];
+        for (const key of candidates) {
+            if (Object.prototype.hasOwnProperty.call(row, key)) {
+                const n = toPositiveNumber(row[key]);
+                if (n !== null) return n;
+            }
+        }
+        return null;
+    };
+
+    let width = null;
+
+    // 1) Production Order header UDF (OWOR.U_Width), keyed by DocEntry (== AbsoluteEntry).
+    if (Number.isFinite(absEntry) && absEntry > 0) {
+        try {
+            const rows = await runSapSqlQuery(
+                `SELECT T0."U_Width" FROM OWOR T0 WHERE T0."DocEntry" = ${absEntry}`,
+                'OWOR_U_Width'
+            );
+            width = pickWidth(rows?.[0]);
+        } catch {
+            // ignore — UDF may not exist on OWOR in this SAP
+        }
+    }
+
+    // 2) Fallback: output item master width (OITM.U_Width).
+    if (width === null && code) {
+        const k = code.replace(/'/g, "''");
+        try {
+            const rows = await runSapSqlQuery(
+                `SELECT T0."U_Width" FROM OITM T0 WHERE T0."ItemCode" = '${k}'`,
+                'OITM_U_Width'
+            );
+            width = pickWidth(rows?.[0]);
+        } catch {
+            // ignore — UDF may not exist on OITM in this SAP
+        }
+    }
+
+    setSapLookupCache(cacheKey, width);
+    return width;
+}
+
 /** Job Num = COALESCE(U_VerEntry, DocNum) from SAP job document row (OMJD / ORJD / OCJD). */
 function pickJobNumFromJobDocRow(row, options = {}) {
     if (!row || typeof row !== 'object') return '';
@@ -763,24 +972,45 @@ async function fetchJobNoFromUJobEnt(uJobEnt) {
     return '';
 }
 
+/** Inventory UOM from OITM (same unit as PO planned/issued qty for FG item). */
+async function fetchItemInventoryUOM(itemCode) {
+    const code = (itemCode || '').toString().trim();
+    if (!code) return '';
+
+    const cacheKey = `itemuom:${code}`;
+    const cached = getSapLookupCache(cacheKey);
+    if (cached !== undefined) return cached;
+
+    try {
+        const data = await sapGetRequest(
+            `/Items('${encodeURIComponent(code)}')?$select=ItemCode,InventoryUOM`
+        );
+        const uom = pickFirstNonEmpty(data?.InventoryUOM, data?.inventoryUOM) || '';
+        setSapLookupCache(cacheKey, uom);
+        return uom;
+    } catch {
+        setSapLookupCache(cacheKey, '');
+        return '';
+    }
+}
+
 function renderCode39Svg(value) {
     const { bars, totalWidth } = buildCode39BarSegments(value);
     const rects = bars.map(b => `<rect x="${b.start}" y="0" width="${b.end - b.start}" height="60" fill="#000"/>`).join('');
     return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${Math.max(totalWidth, 1)} 60" preserveAspectRatio="none" shape-rendering="crispEdges">${rects}</svg>`;
 }
 
-let cachedLogoDataUri = null;
+let cachedLogoDataUri = undefined;
 function getLogoDataUri() {
-    if (cachedLogoDataUri !== null) return cachedLogoDataUri;
+    if (cachedLogoDataUri !== undefined) return cachedLogoDataUri;
     try {
         const p = path.join(__dirname, 'vk-logo.png');
         const buf = fs.readFileSync(p);
         cachedLogoDataUri = `data:image/png;base64,${buf.toString('base64')}`;
-        return cachedLogoDataUri;
     } catch {
         cachedLogoDataUri = '';
-        return cachedLogoDataUri;
     }
+    return cachedLogoDataUri;
 }
 
 function buildMasterLabelHTML(data, boxNum, totalBoxes, options = {}) {
@@ -812,7 +1042,8 @@ function buildMasterLabelHTML(data, boxNum, totalBoxes, options = {}) {
   .fields-table .k{width:30mm;color:#333}
   .fields-table .v{font-weight:600}
   .two{margin-top:1mm}
-  .details-grid{width:100%}
+  .details-grid{width:100%;table-layout:fixed}
+  .details-grid .barcode-cell{width:58mm;text-align:center;vertical-align:top;padding-left:2mm}
   .details-grid td{padding:0.8mm 0;vertical-align:top}
   .details-grid .k{width:30mm;color:#333;vertical-align:baseline}
   .details-grid .v{font-weight:600;vertical-align:baseline}
@@ -850,15 +1081,14 @@ function buildMasterLabelHTML(data, boxNum, totalBoxes, options = {}) {
           <td class="k">Job No</td><td class="v">${escapeHtml(data.jobNo)}</td>
         </tr>
         <tr>
-          <td class="k">Quantity</td><td class="v">${escapeHtml(String(data.quantity || ''))}</td>
+          <td class="k">${escapeHtml(getLabelQuantityLabel(data))}</td><td class="v">${escapeHtml(getLabelQuantityValue(data))}</td>
         </tr>
         <tr>
           <td class="k">Packed On</td><td class="v">${escapeHtml(data.packedOn)}</td>
-          <td class="rk">Box No</td><td class="rv">${boxNum}/${totalBoxes}</td>
+          <td class="rk">Batch No</td><td class="rv">${escapeHtml(data.batchNo)}</td>
         </tr>
         <tr>
-          <td class="k">Operator</td><td class="v">${escapeHtml(data.operator)}</td>
-          <td class="rk">Batch No</td><td class="rv">${escapeHtml(data.batchNo)}</td>
+          <td class="k">Operator</td><td class="v" colspan="3">${escapeHtml(data.operator)}</td>
         </tr>
       </table>
     </div>
@@ -892,7 +1122,8 @@ function buildMasterLabelDocumentHeadCss() {
   .fields-table .k{width:30mm;color:#333}
   .fields-table .v{font-weight:600}
   .two{margin-top:1mm}
-  .details-grid{width:100%}
+  .details-grid{width:100%;table-layout:fixed}
+  .details-grid .barcode-cell{width:58mm;text-align:center;vertical-align:top;padding-left:2mm}
   .details-grid td{padding:0.8mm 0;vertical-align:top}
   .details-grid .k{width:30mm;color:#333;vertical-align:baseline}
   .details-grid .v{font-weight:600;vertical-align:baseline}
@@ -934,15 +1165,14 @@ function buildMasterLabelInnerHTML(data, boxNum, totalBoxes) {
           <td class="k">Job No</td><td class="v">${escapeHtml(data.jobNo)}</td>
         </tr>
         <tr>
-          <td class="k">Quantity</td><td class="v">${escapeHtml(String(data.quantity || ''))}</td>
+          <td class="k">${escapeHtml(getLabelQuantityLabel(data))}</td><td class="v">${escapeHtml(getLabelQuantityValue(data))}</td>
         </tr>
         <tr>
           <td class="k">Packed On</td><td class="v">${escapeHtml(data.packedOn)}</td>
-          <td class="rk">Box No</td><td class="rv">${boxNum}/${totalBoxes}</td>
+          <td class="rk">Batch No</td><td class="rv">${escapeHtml(data.batchNo)}</td>
         </tr>
         <tr>
-          <td class="k">Operator</td><td class="v">${escapeHtml(data.operator)}</td>
-          <td class="rk">Batch No</td><td class="rv">${escapeHtml(data.batchNo)}</td>
+          <td class="k">Operator</td><td class="v" colspan="3">${escapeHtml(data.operator)}</td>
         </tr>
       </table>
     </div>
@@ -1980,6 +2210,31 @@ async function runSapSqlQuery(sqlText, label) {
     }
 }
 
+/** Highest 3-digit seq in SAP for Unit 1 batches (PBP-12-1003-ALO-EMB-001 → 1). */
+async function getSapMaxItemBatchSeq(itemCode, processTag) {
+    const code = String(itemCode || '').trim();
+    const tag = String(processTag || '').trim().toUpperCase();
+    if (!code || !tag) return 0;
+
+    const k = code.replace(/'/g, "''");
+    const sql = `SELECT T0."DistNumber" FROM OBTN T0 WHERE T0."ItemCode" = '${k}' ORDER BY T0."DistNumber" DESC`;
+    let rows = [];
+    try {
+        rows = await runSapSqlQuery(sql, 'item_batch_seq');
+    } catch (err) {
+        console.warn(`   SAP batch seq lookup failed for ${code}-${tag}:`, err.message);
+        return 0;
+    }
+
+    let maxSeq = 0;
+    for (const row of rows || []) {
+        const dist = row.DistNumber ?? row.distNumber ?? row.DISTNUMBER;
+        const seq = parseUnit1BatchSeq(dist, code, tag);
+        if (seq !== null && seq > maxSeq) maxSeq = seq;
+    }
+    return maxSeq;
+}
+
 /**
  * Make authenticated POST request to SAP
  */
@@ -2061,13 +2316,17 @@ async function sapPostRequest(endpoint, data) {
 /**
  * Make authenticated PATCH request to SAP
  */
-async function sapPatchRequest(endpoint, data) {
+async function sapPatchRequest(endpoint, data, options = {}) {
     const session = await authenticateSAP();
 
     const headers = {
         'Content-Type': 'application/json',
         'Accept': 'application/json'
     };
+
+    if (options.replaceCollectionsOnPatch) {
+        headers['B1S-ReplaceCollectionsOnPatch'] = 'true';
+    }
 
     if (session.sessionId) {
         headers['B1S-SessionId'] = session.sessionId;
@@ -2113,6 +2372,41 @@ async function sapPatchRequest(endpoint, data) {
     }
 }
 
+function extractSapErrorMessage(error) {
+    return error?.response?.data?.error?.message?.value
+        || error?.response?.data?.error?.message
+        || error?.message
+        || 'Unknown SAP error';
+}
+
+/** Default receiving bin for bin-managed warehouses (e.g. OHJW-U1 coating). */
+async function getReceivingBinAbsEntry(warehouseCode, itemCode) {
+    const wh = String(warehouseCode || '').trim().replace(/'/g, "''");
+    const ic = String(itemCode || '').trim().replace(/'/g, "''");
+    if (!wh) return null;
+
+    try {
+        if (ic) {
+            const dfltRows = await runSapSqlQuery(
+                `SELECT T0."DfltBinAbs" AS "BinAbs" FROM OITW T0 WHERE T0."WhsCode" = '${wh}' AND T0."ItemCode" = '${ic}' AND IFNULL(T0."DfltBinAbs", 0) > 0`,
+                'item_default_bin'
+            );
+            const dflt = dfltRows[0]?.BinAbs ?? dfltRows[0]?.binAbs;
+            if (dflt) return Number(dflt);
+        }
+
+        const binRows = await runSapSqlQuery(
+            `SELECT T0."AbsEntry" AS "BinAbs" FROM OBIN T0 WHERE T0."WhsCode" = '${wh}' ORDER BY T0."BinCode"`,
+            'warehouse_bins'
+        );
+        const first = binRows[0]?.BinAbs ?? binRows[0]?.binAbs;
+        return first ? Number(first) : null;
+    } catch (err) {
+        console.warn(`   Bin lookup failed for ${wh}/${itemCode}:`, err.message);
+        return null;
+    }
+}
+
 /**
  * Post job completion to SAP InventoryGenEntries
  * @param {Object} completionData - Job completion data
@@ -2121,6 +2415,39 @@ async function sapPatchRequest(endpoint, data) {
 async function postJobCompletionToSAP(completionData) {
     const currentDate = getSAPPostingDate();
 
+    let baseLine = completionData.baseLine;
+    let warehouseCode = completionData.warehouseCode || null;
+    const itemCode = completionData.itemCode || '';
+
+    if (completionData.absoluteEntry && (baseLine == null || !warehouseCode)) {
+        try {
+            const poData = await sapGetRequest(
+                `/ProductionOrders(${completionData.absoluteEntry})?$select=ItemNo,ProductionOrderLines`
+            );
+            const resolved = resolveMainProductCompletionLine(poData, itemCode || poData.ItemNo);
+            if (baseLine == null) baseLine = resolved.baseLine;
+            const mainLine = (poData.ProductionOrderLines || []).find(
+                (line) => line.LineNumber === resolved.baseLine
+            );
+            warehouseCode = mainLine?.Warehouse || mainLine?.WarehouseCode || warehouseCode;
+        } catch (poErr) {
+            console.warn('   Could not resolve PO line/warehouse for completion:', poErr.message);
+        }
+    }
+
+    // All coating FG (HRI / ALO / TRI / TR …) receipts go to OHJW-U1
+    if (isUnit1CoatingJob(completionData.uPCode, itemCode)) {
+        warehouseCode = UNIT1_WAREHOUSES.COT;
+        console.log(`   🎨 Coating output → warehouse ${warehouseCode} (${itemCode || 'item n/a'})`);
+    }
+
+    const binAbsEntry = warehouseCode
+        ? await getReceivingBinAbsEntry(warehouseCode, itemCode)
+        : null;
+    if (binAbsEntry) {
+        console.log(`   📦 Using bin AbsEntry ${binAbsEntry} for warehouse ${warehouseCode}`);
+    }
+
     // Build SAP payload - Note: UDFs like U_Operator may not work in BatchNumbers during creation
     // We'll update them via PATCH after the batch is created
     const linePayload = {
@@ -2128,9 +2455,7 @@ async function postJobCompletionToSAP(completionData) {
         BaseEntry: completionData.absoluteEntry,  // AbsoluteEntry from production order
         Quantity: completionData.quantity,
         TransactionType: 'botrntComplete',
-        ...(completionData.baseLine !== null && completionData.baseLine !== undefined
-            ? { BaseLine: completionData.baseLine }
-            : {}),
+        ...(baseLine !== null && baseLine !== undefined ? { BaseLine: baseLine } : {}),
         BatchNumbers: [
             {
                 BatchNumber: completionData.batchNumber,
@@ -2140,17 +2465,24 @@ async function postJobCompletionToSAP(completionData) {
                 U_BatchDt1: completionData.batchMachineLabel || completionData.machineName || '',
                 U_BatchDt2: completionData.startTime || '',
                 U_BatchDt3: completionData.endTime || '',
-                U_nopkg: completionData.packingDetails || '',
+                ...(completionData.packingDetails ? { U_nopkg: completionData.packingDetails } : {}),
                 U_BatchDt5: completionData.batchAppLabel || 'Data Entry WebApp',
                 ...(completionData.customerName ? { U_PrNa: completionData.customerName } : {})
             }
-        ]
+        ],
+        ...(binAbsEntry ? {
+            DocumentLinesBinAllocations: [{
+                BinAbsEntry: binAbsEntry,
+                Quantity: completionData.quantity,
+                AllowNegativeQuantity: 'tNO'
+            }]
+        } : {})
     };
 
     const sapPayload = {
         DocDate: currentDate,
-        BPLID: 3,  // Branch
-        BPL_IDAssignedToInvoice: 3,  // Branch reference
+        BPLID: SAP_BPL_ID,
+        BPL_IDAssignedToInvoice: SAP_BPL_ID,
         Comments: completionData.remarks || 'Production completion from Data Entry WebApp',
         DocumentLines: [linePayload]
     };
@@ -2226,16 +2558,22 @@ async function postJobCompletionToSAP(completionData) {
             console.log(`   batchNumber: ${completionData.batchNumber || 'N/A'}`);
         }
         
-        return { success: true, data: result, batchNumber: completionData.batchNumber };
+        return {
+            success: true,
+            data: result,
+            batchNumber: completionData.batchNumber,
+            warehouseCode: warehouseCode || null
+        };
     } catch (error) {
-        console.error('❌ SAP posting failed:', error.message);
+        const sapMessage = extractSapErrorMessage(error);
+        console.error('❌ SAP posting failed:', sapMessage);
         // Log detailed SAP error
         if (error.response?.data) {
             console.error('❌ SAP Error Details:', JSON.stringify(error.response.data, null, 2));
         }
         return {
             success: false,
-            error: error.message,
+            error: sapMessage,
             details: error.response?.data || null
         };
     }
@@ -2474,8 +2812,8 @@ async function issueJumbledCoProductsBeforeCompletion(params) {
         try {
             const receiptResult = await sapPostRequest('/InventoryGenEntries', {
                 DocDate: currentDate,
-                BPLID: 3,
-                BPL_IDAssignedToInvoice: 3,
+                BPLID: SAP_BPL_ID,
+                BPL_IDAssignedToInvoice: SAP_BPL_ID,
                 Comments: remarks || `Jumbled co-product pre-receipt PO ${documentNumber || absoluteEntry}`,
                 DocumentLines: [receiptLine]
             });
@@ -2566,8 +2904,8 @@ async function postJumbledJobCompletionToSAP(completionData) {
 
     const sapPayload = {
         DocDate: currentDate,
-        BPLID: 3,
-        BPL_IDAssignedToInvoice: 3,
+        BPLID: SAP_BPL_ID,
+        BPL_IDAssignedToInvoice: SAP_BPL_ID,
         Comments: completionData.remarks || 'Jumbled job main product completion from Data Entry WebApp',
         DocumentLines: [linePayload]
     };
@@ -3002,72 +3340,121 @@ function calculateJobDurationHours(startTime, endTime) {
 }
 
 function compactProductionOrderLine(line) {
-    return {
+    const compact = {
         LineNumber: line.LineNumber,
         ItemNo: line.ItemNo,
         BaseQuantity: line.BaseQuantity,
         PlannedQuantity: line.PlannedQuantity,
         ItemType: line.ItemType
     };
+    const wh = line.Warehouse || line.WarehouseCode;
+    if (wh) compact.Warehouse = wh;
+    return compact;
 }
 
-/** App machine id (URL param) → SAP ORSC ResCode */
-const MACHINE_TO_RES_CODE = {
-    'nova-cut-1': 'DC-01',
-    'nova-cut-2': 'DC-02',
-    'manual-mdc-1': 'MDC-01',
-    'manual-mdc-2': 'MDC-02',
-    'manual-mdc-3': 'MDC-03',
-    'manual-mdc-4': 'MDC-04',
-    'mk-foiling': 'FOI-01',
-    'manual-mf': 'MF-01',
-    'ambition': 'FOLDER GLUER 1',
-    'visionfold': 'FOLDER GLUER 2',
-    'nova-fold': 'FOLDER GLUER 3',
-    'yilee': 'LM-01',
-    'yong-shun': 'LM-02',
-    'narendra': 'RLM-01',
-    'wity': 'SHT-01',
-    'spotuv-sakurai': 'UVM-01',
-    'spotuv-horda': 'CAS-01',
-    'spotuv-apr': 'APR',
-    'cx75_6l': 'PM-01',
-    'cd102_4': 'PM-06',
-    'cd102_4l': 'PM-05',
-    'cd102_6l': 'PM-02',
-    'sm102_2': 'PM-07',
-    'sm74_4': 'PM-04',
-    'sm74_5': 'PM-03',
-    'sm102_1': 'PM-08',
-    'sord 1': 'PM-09',
-    'sord 2': 'PM-10',
-    'autoprint': 'UVM-02',
-    'rigid-emmeci-1': 'RBM-01',
-    'rigid-emmeci-2': 'RBM-02',
-    'rigid-fuchu': 'RBM-03',
-    // Unit 1 - Holographic
-    'embossing-1': 'EMB-01',
-    'embossing-2': 'EMB-02',
-    'embossing-3': 'EMB-03',
-    'rewinding-1': 'RWD-01',
-    'rewinding-2': 'RWD-02',
-    'slitting-1': 'SLT-01',
-    'slitting-2': 'SLT-02',
-    'metallisation-1': 'MLT-01'
+/** Unit 1 warehouse codes (FBD-* / OHJW-U1) — matches Unit_1 warehouse_mapping.py */
+const UNIT1_WAREHOUSES = {
+    RM: 'FBD-RM',
+    FG: 'FBD-FG',
+    EMB: 'FBD-EMB',
+    SLT: 'FBD-SLT',
+    MTL: 'FBD-MTL',
+    COT: 'OHJW-U1'   // All coating FG (HRI / ALO / TRI / TR …) — outsourced
 };
 
-/** Friendly UI labels → app machine id (manual-machine used to send display names). */
-const MACHINE_DISPLAY_ALIASES = {
-    'mdc 1': 'manual-mdc-1',
-    'mdc 2': 'manual-mdc-2',
-    'mdc 3': 'manual-mdc-3',
-    'mdc 4': 'manual-mdc-4',
-    'mf (foiling)': 'manual-mf',
-    'yong shun': 'yong-shun',
-    'emmecci-1': 'rigid-emmeci-1',
-    'emmecci-2': 'rigid-emmeci-2',
-    'assembly': 'rigid-assembly'
+/** True when job is Unit 1 coating (U_PCode COT or FG item …-COT). */
+function isUnit1CoatingJob(uPCode, itemCode) {
+    if (String(uPCode || '').toUpperCase().includes('COT')) return true;
+    return inferUnit1ProcessTagFromItemCode(itemCode) === 'COT';
+}
+
+/** Default warehouse when issuing raw material to a PO (Unit 1). */
+const UNIT1_DEFAULT_ISSUE_WAREHOUSE = UNIT1_WAREHOUSES.RM;
+
+/** Output warehouse for auto-issue after a process completes (by U_PCode / item code). */
+function getUnit1OutputWarehouse(uPCode, itemCode) {
+    if (isUnit1CoatingJob(uPCode, itemCode)) return UNIT1_WAREHOUSES.COT;
+    const u = String(uPCode || '').toUpperCase();
+    if (u.includes('EMB')) return UNIT1_WAREHOUSES.EMB;
+    if (u.includes('REW')) return UNIT1_WAREHOUSES.SLT;
+    if (u.includes('SLT')) return UNIT1_WAREHOUSES.SLT;
+    if (u.includes('MET') || u.includes('MTL')) return UNIT1_WAREHOUSES.MTL;
+    return UNIT1_WAREHOUSES.RM;
+}
+
+/** Unit 1 auxiliary material prefixes (Unit 2 style lines — not process input). */
+function isUnit1AuxMaterialItemNo(itemNo) {
+    const upper = (itemNo || '').toUpperCase();
+    return ['PMT', 'FIL', 'ADH', 'RMC', 'TAP'].some((p) => upper.startsWith(p));
+}
+
+/** Unit 1 machine ids (URL ?machine=...) — no SAP resource / running-cost tracking. */
+const UNIT1_MACHINE_IDS = new Set([
+    'embossing-1', 'embossing-2', 'embossing-3',
+    'rewinding-1', 'rewinding-2',
+    'slitting-1', 'slitting-2',
+    'metallisation-1'
+]);
+
+function isUnit1Machine(machineName) {
+    return UNIT1_MACHINE_IDS.has(normalizeMachineKey(machineName));
+}
+
+/** Unit 2 machine → SAP ORSC ResCode (resource costing — NOT used for Unit 1). */
+const UNIT2_MACHINE_TO_RES_CODE = {
+    // Unit 2 only — Unit 1 machines are in UNIT1_MACHINE_IDS and never use resources
 };
+
+function findSapResourceForMachine(machineName) {
+    const normalized = normalizeMachineKey(machineName);
+    if (!normalized) {
+        return { success: false, error: 'Missing machine name for SAP resource lookup' };
+    }
+    if (isUnit1Machine(normalized)) {
+        return { success: false, skipped: true, error: 'Unit 1 — no SAP machine resources' };
+    }
+
+    const machineKey = UNIT2_MACHINE_TO_RES_CODE[normalized]
+        ? normalized
+        : (MACHINE_DISPLAY_ALIASES[normalized] || normalized);
+
+    const resourceCode = UNIT2_MACHINE_TO_RES_CODE[machineKey];
+    if (!resourceCode) {
+        return {
+            success: false,
+            error: `No SAP ResCode mapping for machine "${machineName}"`,
+            machineName
+        };
+    }
+
+    return {
+        success: true,
+        machineName: machineKey,
+        resourceCode,
+        resourceName: resourceCode
+    };
+}
+
+/** Unit 1: strip accidental pit_Resource lines from PO (no running-cost tracking). */
+async function removeUnit1ResourceLinesFromPO(absoluteEntry) {
+    const poData = await sapGetRequest(`/ProductionOrders(${absoluteEntry})?$select=AbsoluteEntry,ProductionOrderLines`);
+    const lines = Array.isArray(poData?.ProductionOrderLines) ? poData.ProductionOrderLines : [];
+    const toRemove = lines.filter((line) => isSapResourceLine(line));
+    if (toRemove.length === 0) {
+        return { removed: 0 };
+    }
+    const removeNums = new Set(toRemove.map((l) => l.LineNumber));
+    const kept = lines.filter((l) => !removeNums.has(l.LineNumber));
+    await sapPatchRequest(
+        `/ProductionOrders(${absoluteEntry})`,
+        { ProductionOrderLines: kept.map(compactProductionOrderLine) },
+        { replaceCollectionsOnPatch: true }
+    );
+    console.log(`   🧹 Removed ${toRemove.length} resource line(s) from Unit 1 PO: ${toRemove.map((l) => l.ItemNo).join(', ')}`);
+    return { removed: toRemove.length, codes: toRemove.map((l) => l.ItemNo) };
+}
+
+const MACHINE_DISPLAY_ALIASES = {};
 
 function normalizeMachineKey(machineName) {
     return String(machineName || '').trim().toLowerCase();
@@ -3088,39 +3475,55 @@ function isSapItemLine(line) {
     return itemType === 'pit_Item' || itemType === 4 || String(itemType) === '4';
 }
 
-/** Product line for issued/completed/base qty: pit_Item and not PMT/RMC/FIL/ADH/TAP. */
+/** Unit 1 raw-material warehouse lines (e.g. PET from FBD-RM) — excluded from FG progress stats. */
+function isUnit1RawMaterialLine(line) {
+    const wh = (line?.Warehouse || line?.WarehouseCode || '').toString().trim().toUpperCase();
+    return wh === UNIT1_WAREHOUSES.RM;
+}
+
+/**
+ * PO BOM component line to issue at Running (Unit 1).
+ * Warehouse is taken from the SAP PO line — not inferred from U_PCode or item suffix.
+ */
+function isUnit1MaterialIssueLine(line, headerItemNo) {
+    if (!isSapItemLine(line) || isSapResourceLine(line)) return false;
+    const itemNo = getProductionOrderLineItemNo(line);
+    if (!itemNo) return false;
+    const header = String(headerItemNo || '').trim().toUpperCase();
+    if (header && itemNo.toUpperCase() === header) return false;
+    const upper = itemNo.toUpperCase();
+    // Glue/film/chemical BOM lines on Unit 1 POs are real consumables — issue at Running
+    if (upper.startsWith('ADH') || upper.startsWith('FIL')) {
+        return Number(line.PlannedQuantity || 0) > 0;
+    }
+    if (isUnit1AuxMaterialItemNo(itemNo)) return false;
+    return Number(line.PlannedQuantity || 0) > 0;
+}
+
+function isUnit1ProcessCode(uPCode) {
+    const u = String(uPCode || '').toUpperCase();
+    return u.includes('EMB') || u.includes('REW') || u.includes('SLT') ||
+        u.includes('MET') || u.includes('MTL') || u.includes('COT');
+}
+
+function sumUnit1MaterialQuantities(lines, headerItemNo) {
+    let planned = 0;
+    let issued = 0;
+    for (const line of lines || []) {
+        if (!isUnit1MaterialIssueLine(line, headerItemNo)) continue;
+        planned += Number(line.PlannedQuantity || 0);
+        issued += Number(line.IssuedQuantity || 0);
+    }
+    return { planned, issued };
+}
+
+/** Product line for issued/completed/base qty: pit_Item and not PMT/RMC/FIL/ADH/TAP/raw RM. */
 function isProductionOrderItemProductLine(line, isExcludedMaterialItemNo) {
     if (!line || !isSapItemLine(line)) return false;
+    if (isUnit1RawMaterialLine(line)) return false;
     const itemNo = getProductionOrderLineItemNo(line);
     if (!itemNo) return false;
     return !isExcludedMaterialItemNo(itemNo);
-}
-
-function findSapResourceForMachine(machineName) {
-    const normalized = normalizeMachineKey(machineName);
-    if (!normalized) {
-        return { success: false, error: 'Missing machine name for SAP resource lookup' };
-    }
-
-    const machineKey = MACHINE_TO_RES_CODE[normalized]
-        ? normalized
-        : (MACHINE_DISPLAY_ALIASES[normalized] || normalized);
-
-    const resourceCode = MACHINE_TO_RES_CODE[machineKey];
-    if (!resourceCode) {
-        return {
-            success: false,
-            error: `No SAP ResCode mapping for machine "${machineName}"`,
-            machineName
-        };
-    }
-
-    return {
-        success: true,
-        machineName: machineKey,
-        resourceCode,
-        resourceName: resourceCode
-    };
 }
 
 async function addResourceLineToProductionOrder(absoluteEntry, lines, resourceCode, quantityHours) {
@@ -3193,7 +3596,11 @@ async function ensureAndIssueProductionResource(params) {
     } = params;
 
     try {
-        console.log('\n🛠️ ========== PRODUCTION RESOURCE ISSUE ==========');
+        if (isUnit1Machine(machineName)) {
+            return { success: true, skipped: true, reason: 'unit1_no_resources' };
+        }
+
+        console.log('\n🛠️ ========== PRODUCTION RESOURCE ISSUE (Unit 2) ==========');
         console.log(`   PO: ${documentNumber || absoluteEntry}`);
         console.log(`   Machine: ${machineName}`);
         console.log(`   Start: ${startTime}`);
@@ -3312,8 +3719,8 @@ async function ensureAndIssueProductionResource(params) {
 
         const issuePayload = {
             DocDate: currentDate,
-            BPLID: 3,
-            BPL_IDAssignedToInvoice: 3,
+            BPLID: SAP_BPL_ID,
+            BPL_IDAssignedToInvoice: SAP_BPL_ID,
             Comments: remarks || `Resource issue for PO ${documentNumber || absoluteEntry}`,
             DocumentLines: [issueLine]
         };
@@ -3362,7 +3769,8 @@ async function issueToNextProcessFIFO(params) {
         itemCode,
         producedQty,
         batchNumber,
-        remarks
+        remarks,
+        sourceWarehouse
     } = params;
 
     try {
@@ -3372,15 +3780,17 @@ async function issueToNextProcessFIFO(params) {
         console.log(`   Produced Qty: ${producedQty}`);
         console.log(`   Batch to issue: ${batchNumber}`);
 
+        const warehouseFallback = sourceWarehouse || UNIT1_DEFAULT_ISSUE_WAREHOUSE;
+
         // Use target line info if provided (from dynamic search)
         let baseLine = 0;
-        let warehouseCode = 'II-DIE'; // Default warehouse
+        let warehouseCode = warehouseFallback;
         let maxQuantityToIssue = nextPOPlannedQty;
 
         if (targetLine) {
-            // Use the specific line where the item is required
+            // Issue from source warehouse (where batch was produced), not PO line default
             baseLine = targetLine.lineNumber;
-            warehouseCode = targetLine.warehouse || 'II-DIE';
+            warehouseCode = sourceWarehouse || targetLine.warehouse || warehouseFallback;
             maxQuantityToIssue = targetLine.remainingQuantity;
             
             console.log(`   Using target line from dynamic search:`);
@@ -3396,7 +3806,7 @@ async function issueToNextProcessFIFO(params) {
                 const lineItemCode = line.ItemNo || line.ItemCode;
                 if (lineItemCode === itemCode) {
                     baseLine = line.LineNumber || 0;
-                    warehouseCode = line.Warehouse || line.WarehouseCode || 'II-DIE';
+                    warehouseCode = line.Warehouse || line.WarehouseCode || warehouseFallback;
                     const issuedQty = line.IssuedQuantity || 0;
                     const plannedQty = line.PlannedQuantity || 0;
                     maxQuantityToIssue = plannedQty - issuedQty;
@@ -3413,7 +3823,7 @@ async function issueToNextProcessFIFO(params) {
             // Fallback to first line if no match found
             if (baseLine === 0 && nextPOLines[0]) {
                 const firstLine = nextPOLines[0];
-                warehouseCode = firstLine.Warehouse || firstLine.WarehouseCode || 'II-DIE';
+                warehouseCode = firstLine.Warehouse || firstLine.WarehouseCode || warehouseFallback;
                 console.log(`   No matching line found, using first line:`);
                 console.log(`     BaseLine: 0`);
                 console.log(`     ItemNo: ${firstLine.ItemNo}`);
@@ -3449,8 +3859,8 @@ async function issueToNextProcessFIFO(params) {
 
         const sapPayload = {
             DocDate: currentDate,
-            BPLID: 3,
-            BPL_IDAssignedToInvoice: 3,
+            BPLID: SAP_BPL_ID,
+            BPL_IDAssignedToInvoice: SAP_BPL_ID,
             Comments: remarks || `Auto-issue to PO ${nextPODocNumber}`,
             DocumentLines: [{
                 BaseType: 202,  // Production Order
@@ -3492,6 +3902,142 @@ async function issueToNextProcessFIFO(params) {
         return {
             success: false,
             error: error.message,
+            details: error.response?.data || null
+        };
+    }
+}
+
+/** FIFO batch allocation from warehouse stock (oldest batch first). */
+async function allocateFifoBatchesFromWarehouse(itemCode, warehouseCode, quantityNeeded) {
+    const qty = Number(quantityNeeded) || 0;
+    if (qty <= 0) return { allocations: [], shortfall: 0 };
+
+    const k = String(itemCode || '').replace(/'/g, "''");
+    const w = String(warehouseCode || '').replace(/'/g, "''");
+    const sql = `SELECT T0."DistNumber" AS "BatchNumber", T1."Quantity" FROM OBTN T0 INNER JOIN OBTQ T1 ON T0."AbsEntry" = T1."MdAbsEntry" WHERE T1."ItemCode" = '${k}' AND T1."WhsCode" = '${w}' AND T1."Quantity" > 0 ORDER BY T0."DistNumber" ASC`;
+    const rows = await runSapSqlQuery(sql, 'auto_issue_fifo');
+
+    const allocations = [];
+    let remaining = qty;
+    for (const row of rows) {
+        if (remaining <= 1e-6) break;
+        const batchNumber = row.BatchNumber || row.BATCHNUMBER || row.DistNumber;
+        const stock = Number(row.Quantity || row.QUANTITY || 0);
+        if (!batchNumber || stock <= 0) continue;
+        const take = Math.min(remaining, stock);
+        allocations.push({ batchNumber, quantity: take });
+        remaining -= take;
+    }
+    return { allocations, shortfall: Math.max(0, remaining) };
+}
+
+/**
+ * Issue cumulative gap: SAP source PO completed − next PO material issued.
+ * Handles missed auto-issues from prior batches and multi-batch FIFO stock.
+ */
+async function reconcileAutoIssueGap(params) {
+    const {
+        sourceAbsoluteEntry,
+        sourceDocNumber,
+        uJobEnt,
+        finishedItemCode,
+        sourceWarehouse,
+        uPCode,
+        remarks
+    } = params;
+
+    try {
+        const sourcePO = await sapGetRequest(
+            `/ProductionOrders(${sourceAbsoluteEntry})?$select=AbsoluteEntry,DocumentNumber,CompletedQuantity,ItemNo`
+        );
+        const sourceCompleted = Math.floor(sourcePO.CompletedQuantity || 0);
+        if (sourceCompleted <= 0) {
+            return { success: true, skipped: true, gap: 0, message: 'No SAP completed qty on source PO' };
+        }
+
+        const nextPO = await findNextProcessByItemRequired(
+            uJobEnt,
+            finishedItemCode,
+            sourceAbsoluteEntry
+        );
+        if (!nextPO?.targetLine) {
+            return { success: false, skipped: true, error: 'No next process PO found requiring this item' };
+        }
+
+        const nextIssued = Number(nextPO.targetLine.issuedQuantity || 0);
+        const gap = sourceCompleted - nextIssued;
+        console.log(`   📊 Auto-issue reconcile: source SAP done=${sourceCompleted}, next issued=${nextIssued}, gap=${gap}`);
+
+        if (gap <= 0) {
+            return { success: true, skipped: true, gap: 0, message: 'Source completed and next issued already in sync' };
+        }
+
+        const maxIssue = Number(nextPO.targetLine.remainingQuantity || 0);
+        const quantityToIssue = maxIssue > 0 ? Math.min(gap, maxIssue) : gap;
+        if (quantityToIssue <= 0) {
+            return { success: true, skipped: true, gap, message: 'Next PO line fully issued' };
+        }
+
+        const releaseResult = await releaseProductionOrder(nextPO.absoluteEntry, nextPO.documentNumber);
+        if (!releaseResult.success) {
+            return { success: false, error: `Failed to release PO ${nextPO.documentNumber}: ${releaseResult.error}`, gap };
+        }
+
+        const warehouseCode = sourceWarehouse || nextPO.targetLine.warehouse || UNIT1_DEFAULT_ISSUE_WAREHOUSE;
+        const { allocations, shortfall } = await allocateFifoBatchesFromWarehouse(
+            finishedItemCode,
+            warehouseCode,
+            quantityToIssue
+        );
+
+        if (shortfall > 0 || allocations.length === 0) {
+            return {
+                success: false,
+                error: `Insufficient batch stock in ${warehouseCode} for ${finishedItemCode} (need ${quantityToIssue}, short ${shortfall || quantityToIssue})`,
+                gap,
+                shortfall: shortfall || quantityToIssue
+            };
+        }
+
+        const currentDate = getSAPPostingDate();
+        const sapPayload = {
+            DocDate: currentDate,
+            BPLID: SAP_BPL_ID,
+            BPL_IDAssignedToInvoice: SAP_BPL_ID,
+            Comments: remarks || `Auto-issue reconcile PO ${sourceDocNumber || sourcePO.DocumentNumber} → ${nextPO.documentNumber}`,
+            DocumentLines: [{
+                BaseType: 202,
+                BaseEntry: nextPO.absoluteEntry,
+                BaseLine: nextPO.targetLine.lineNumber,
+                Quantity: quantityToIssue,
+                WarehouseCode: warehouseCode,
+                TransactionType: 'botrntIssue',
+                BatchNumbers: allocations.map((a) => ({
+                    BatchNumber: a.batchNumber,
+                    Quantity: a.quantity
+                }))
+            }]
+        };
+
+        console.log(`   📤 Reconcile issue: ${quantityToIssue} to PO ${nextPO.documentNumber} (${allocations.length} batch(es))`);
+        const result = await sapPostRequest('/InventoryGenExits', sapPayload);
+
+        return {
+            success: true,
+            totalIssued: quantityToIssue,
+            gap,
+            batchesIssued: allocations.length,
+            docEntry: result?.DocEntry,
+            targetPO: nextPO.documentNumber,
+            targetProcess: nextPO.uPCode,
+            warehouse: warehouseCode,
+            message: `Reconciled ${quantityToIssue} units to PO ${nextPO.documentNumber}`
+        };
+    } catch (error) {
+        console.error('❌ Auto-issue reconcile failed:', error.message);
+        return {
+            success: false,
+            error: extractSapErrorMessage(error),
             details: error.response?.data || null
         };
     }
@@ -3607,8 +4153,8 @@ async function issueLAMMaterials(params) {
                 try {
                     const adhesivePayload = {
                         DocDate: currentDate,
-                        BPLID: 3,
-                        BPL_IDAssignedToInvoice: 3,
+                        BPLID: SAP_BPL_ID,
+                        BPL_IDAssignedToInvoice: SAP_BPL_ID,
                         Comments: remarks || `Adhesive issue for PO ${documentNumber}`,
                         DocumentLines: [{
                             BaseType: 202,  // Production Order
@@ -3825,120 +4371,46 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
         console.log(`   Using Production Order DocumentNumber=${docNumber}, Series=${productionOrder.Series}, AbsoluteEntry=${productionOrder.AbsoluteEntry}`);
         const uPCode = productionOrder.U_PCode;
 
-        // Validate U_PCode against machine/process type.
-        // RIGID Assembly is intentionally unrestricted: it can load jobs from any U_PCode,
-        // while still returning material issue data for the operator to issue before completion.
-        const machineLowerForValidation = (machine || '').toString().toLowerCase();
-        const isAssemblyMachineForValidation =
-            machineLowerForValidation === 'rigid-assembly' ||
-            machineLowerForValidation === 'assembly' ||
-            machineLowerForValidation.includes('assembly');
-        if (processParam && !isAssemblyMachineForValidation) {
+        if (isUnit1ProcessCode(productionOrder.U_PCode)) {
+            try {
+                const stripResult = await removeUnit1ResourceLinesFromPO(productionOrder.AbsoluteEntry);
+                if (stripResult.removed > 0) {
+                    const refreshed = await sapGetRequest(
+                        `/ProductionOrders(${productionOrder.AbsoluteEntry})?$select=ProductionOrderLines`
+                    );
+                    productionOrder.ProductionOrderLines = refreshed.ProductionOrderLines;
+                }
+            } catch (stripErr) {
+                console.warn('⚠️ Unit 1 resource strip on PO load:', stripErr.message);
+            }
+        }
+
+        // Validate U_PCode against Unit 1 process type
+        if (processParam) {
             const processLower = String(processParam).toLowerCase();
-            let expectedPatterns = [];  // Patterns to match (using contains/includes logic)
+            let expectedPatterns = [];
             let processType = '';
-            let matchMode = 'includes'; // 'includes' | 'startsWith'
 
-            // Determine expected U_PCode patterns based on process type
-            // Using partial matching (like SQL LIKE '%pattern%')
-            if (processLower.includes('diecutting') || processLower.includes('die-cutting') || processLower.includes('die cutting')) {
-                expectedPatterns = ['DIE', 'EMB', 'EMB+P'];  // Will match DIE, DIE+P, DIE+EMB, EMB, etc.
-                processType = 'DieCutting';
-            } else if (processLower.includes('lamination')) {
-                expectedPatterns = ['LAM'];  // Default: will match LAM, LAM+X, etc.
-                processType = 'Lamination';
-
-                const machineLower = (machine || '').toString().toLowerCase();
-                // Machine-specific U_PCode allowances
-                if (machineLower === 'wity' || machineLower === 'witty') {
-                    // Witty/Wity machine can run LAM jobs and the SHT process code.
-                    expectedPatterns = ['LAM', 'SHT'];
-                }
-                if (machineLower === 'narendra') {
-                    // Narendra machine can run these process codes
-                    expectedPatterns = ['PRI', 'COT', 'LAM', 'MPET'];
-                }
-                if (machineLower === 'yilee' || machineLower === 'yong-shun' || machineLower === 'yongshun') {
-                    // These lamination machines can also run MPET jobs
-                    expectedPatterns = ['LAM', 'MPET'];
-                }
-            } else if (processLower.includes('foiling')) {
-                // Foiling machines can also run DIE, EMB, EMB+P jobs
-                expectedPatterns = ['FOI', 'DIE', 'EMB', 'EMB+P'];  // Will match FOI, DIE, EMB, EMB+P, etc.
-                processType = 'Foiling';
-            } else if (processLower.includes('pasting') || processLower.includes('folding')) {
-                expectedPatterns = ['PST'];  // Will match PST, PST+X, etc.
-                processType = 'Pasting/Folding';
-            } else if (
-                processLower.includes('spot-uv') ||
-                (processLower.includes('spot') && processLower.includes('uv'))
-            ) {
-                // Spot-UV machines: U_PCode must match specific prefixes
-                processType = 'Spot-UV';
-                matchMode = 'startsWith';
-
-                const machineLower = (machine || '').toString().toLowerCase();
-                if (machineLower === 'spotuv-sakurai') expectedPatterns = ['SP'];
-                else if (machineLower === 'spotuv-horda') expectedPatterns = ['CAS'];
-                else if (machineLower === 'spotuv-apr') expectedPatterns = ['TAP'];
-                else expectedPatterns = ['SP', 'CAS', 'TAP'];
-            } else if (processLower.includes('embossing')) {
-                expectedPatterns = ['EMB'];
+            if (processLower.includes('embossing')) {
+                expectedPatterns = ['EMB', 'COT'];
                 processType = 'Embossing';
             } else if (processLower.includes('rewinding')) {
-                expectedPatterns = ['RWD'];
+                expectedPatterns = ['REW'];
                 processType = 'Rewinding';
             } else if (processLower.includes('slitting')) {
                 expectedPatterns = ['SLT'];
                 processType = 'Slitting';
             } else if (processLower.includes('metallisation') || processLower.includes('metallization')) {
-                expectedPatterns = ['MLT'];
+                expectedPatterns = ['MET'];
                 processType = 'Metallisation';
-            } else if (processLower.includes('rigid')) {
-                // RIGID machines:
-                // - Assembly -> U_PCode must contain ASS
-                // - Emmeci-1, Emmeci-2, Fuchu -> U_PCode must *start with* MKG (e.g. MKG-TOP, MKG-BOTT)
-                processType = 'RIGID';
-
-                const machineLower = (machine || '').toString().toLowerCase();
-                if (machineLower === 'rigid-assembly' || machineLower === 'assembly') {
-                    matchMode = 'includes';
-                    expectedPatterns = ['ASS'];
-                } else if (
-                    machineLower === 'rigid-emmeci-1' ||
-                    machineLower === 'rigid-emmeci-2' ||
-                    machineLower === 'rigid-fuchu'
-                ) {
-                    matchMode = 'startsWith';
-                    expectedPatterns = ['MKG'];
-                } else {
-                    // Any other rigid station: same prefix rule as Emmeci/Fuchu
-                    matchMode = 'startsWith';
-                    expectedPatterns = ['MKG'];
-                }
             }
 
-            // Check if U_PCode contains any of the expected patterns (partial match)
             if (expectedPatterns.length > 0 && uPCode) {
-                const machineLower = (machine || '').toString().toLowerCase();
                 const uPCodeUpper = uPCode.toUpperCase();
-
-                // Use includes() for partial matching instead of exact match.
-                // Special case: Wity/Witty can load exact SHT jobs in addition to LAM.
-                const codeMatches =
-                    ((machineLower === 'wity' || machineLower === 'witty') && processLower.includes('lamination'))
-                        ? (uPCodeUpper.includes('LAM') || uPCodeUpper === 'SHT')
-                        : (
-                            matchMode === 'startsWith'
-                                ? expectedPatterns.some(pattern => uPCodeUpper.startsWith(pattern))
-                                : expectedPatterns.some(pattern => uPCodeUpper.includes(pattern))
-                        );
+                const codeMatches = expectedPatterns.some(pattern => uPCodeUpper.includes(pattern));
 
                 if (!codeMatches) {
-                    const expectHint =
-                        matchMode === 'startsWith'
-                            ? `start with "${expectedPatterns.join('" or "')}"`
-                            : `contain "${expectedPatterns.join('" or "')}"`;
+                    const expectHint = `contain "${expectedPatterns.join('" or "')}"`;
                     console.log(`⚠️ Process code mismatch! U_PCode: ${uPCode}, Expected to ${expectHint}, Process: ${processType}`);
                     return res.status(400).json({
                         error: 'Process code mismatch',
@@ -3952,9 +4424,9 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
                 }
             }
 
-            console.log(`✅ Process code validated: U_PCode=${uPCode}, Process=${processType}, ExpectedPatterns=${expectedPatterns.join('/')}`);
-        } else if (isAssemblyMachineForValidation) {
-            console.log(`✅ Assembly load allowed without U_PCode restriction: U_PCode=${uPCode || 'blank'}`);
+            if (processType) {
+                console.log(`✅ Process code validated: U_PCode=${uPCode}, Process=${processType}, ExpectedPatterns=${expectedPatterns.join('/')}`);
+            }
         }
 
         // Extract base quantities from ProductionOrderLines
@@ -4000,28 +4472,43 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
             // Check for materials with IssuedQuantity = 0
             // Only check rows where PlannedQuantity is positive (> 0)
             // If PlannedQuantity is negative, skip the check for that row
+            const unit1Po = isUnit1ProcessCode(productionOrder.U_PCode);
+
             productionOrder.ProductionOrderLines
                 .filter(line => {
                     const plannedQty = line.PlannedQuantity || 0;
                     const issuedQty = line.IssuedQuantity || 0;
-                    
+
+                    // Unit 1 Running: only input component for this process (not FG header item or resource)
+                    if (unit1Po) {
+                        if (!isUnit1MaterialIssueLine(line, productionOrder.ItemNo)) return false;
+                    }
+
                     if (DEBUG_PO_LOG && line.ItemNo && line.ItemNo.toUpperCase().startsWith('PMT')) {
                         console.log(`   📦 PMT Material: ${line.ItemNo}, PlannedQty: ${plannedQty}, IssuedQty: ${issuedQty}, NeedsIssue: ${plannedQty > 0 && issuedQty === 0}`);
                     }
                     
-                    // Only include if PlannedQuantity is positive AND nothing has been issued yet
-                    // If issuedQty > 0, material is already issued (fully or partially) - skip it
-                    return plannedQty > 0 && issuedQty === 0;
+                    // Include while issued qty is below planned (supports partial issue / resume)
+                    return plannedQty > 0 && issuedQty < plannedQty - 1e-6;
                 })
                 .forEach(line => {
+                    const plannedQty = line.PlannedQuantity || 0;
+                    const issuedQty = line.IssuedQuantity || 0;
                     const material = {
                         itemNo: line.ItemNo,
                         itemName: line.ItemName || line.ItemNo,
-                        plannedQuantity: line.PlannedQuantity,
-                        issuedQuantity: line.IssuedQuantity || 0,
+                        plannedQuantity: plannedQty,
+                        issuedQuantity: issuedQty,
+                        remainingQuantity: Math.max(0, plannedQty - issuedQty),
                         warehouse: line.Warehouse,
                         lineNumber: line.LineNumber
                     };
+
+                    // Unit 1: every BOM component line issues at Running (batch or qty dialog)
+                    if (unit1Po) {
+                        unissuedMaterials.push(material);
+                        return;
+                    }
                     
                     // For PST jobs, separate PMT materials (allow operator to issue them at Running state)
                     if (isPSTJob && line.ItemNo && line.ItemNo.toUpperCase().startsWith('PMT')) {
@@ -4263,10 +4750,44 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
             completedQuantity = headerCompletedQty;
         }
         
+        const unit1Process = isUnit1ProcessCode(productionOrder.U_PCode);
+        const matQty = sumUnit1MaterialQuantities(
+            productionOrder.ProductionOrderLines,
+            productionOrder.ItemNo
+        );
+        let localCompletedQuantity = 0;
+        let poLocallyReset = false;
+        if (unit1Process) {
+            issuedQuantity = matQty.issued;
+            completedQuantity = headerCompletedQty;
+            try {
+                const localBatches = await getBatchesByPO(String(docNumber));
+                localCompletedQuantity = localBatches.reduce(
+                    (sum, b) => sum + (parseInt(b.quantity_processed, 10) || 0),
+                    0
+                );
+            } catch (localErr) {
+                console.warn(`⚠️ Could not load local batches for PO ${docNumber}:`, localErr.message);
+            }
+            try {
+                poLocallyReset = await isPOLocallyReset(String(docNumber));
+                if (poLocallyReset && localCompletedQuantity === 0) {
+                    completedQuantity = 0;
+                    console.log(`   🔄 PO ${docNumber} locally reset — Already Done forced to 0 until SAP posts`);
+                } else {
+                    completedQuantity = Math.max(headerCompletedQty, localCompletedQuantity);
+                }
+            } catch (resetErr) {
+                console.warn(`⚠️ PO reset check failed for ${docNumber}:`, resetErr.message);
+                completedQuantity = Math.max(headerCompletedQty, localCompletedQuantity);
+            }
+        }
+
         if (DEBUG_PO_LOG) {
             console.log(`📊 Final values for ${docNumber} (U_PCode: ${productionOrder.U_PCode}):`);
-            console.log(`   issuedQuantity: ${issuedQuantity} (pit_Item lines only)`);
-            console.log(`   completedQuantity: ${completedQuantity}`);
+            console.log(`   issuedQuantity: ${issuedQuantity}${unit1Process ? ' (Unit1 RM material)' : ' (pit_Item lines)'}`);
+            console.log(`   materialIssuedQuantity: ${matQty.issued} / ${matQty.planned} planned RM`);
+            console.log(`   completedQuantity: ${completedQuantity}${localCompletedQuantity ? ` (includes ${localCompletedQuantity} from local DB)` : ''}`);
             console.log(`   Note: Frontend converts issued sheets to cartons for DIE/EMB+P jobs`);
         }
 
@@ -4286,16 +4807,44 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
         let itemCodeLabel = '';
         let customerNameByFirm = '';
         let jobNoResolved = '';
+        let inventoryUOM = '';
+        const poCustomerFields = pickPoCustomerFields(productionOrder);
+        let customerNameResolved = poCustomerFields.name || '';
 
         if (enrichPO) {
             // Run independent lookups in parallel (was sequential — major latency on each PO load)
             const tEnrichStart = Date.now();
-            [itemCodeLabel, customerNameByFirm, jobNoResolved] = await Promise.all([
+            [itemCodeLabel, customerNameByFirm, jobNoResolved, customerNameResolved, inventoryUOM] = await Promise.all([
                 fetchOscnSubstitute(productionOrder.ItemNo),
                 fetchCustomerNameFromOITM_OMRC(productionOrder.ItemNo),
-                fetchJobNoFromUJobEnt(productionOrder.U_JobEnt)
+                fetchJobNoFromUJobEnt(productionOrder.U_JobEnt),
+                fetchCustomerNameFromProductionOrder(productionOrder),
+                fetchItemInventoryUOM(productionOrder.ItemNo)
             ]);
             console.log(`   ⏱️ Enrichment lookups took ${Date.now() - tEnrichStart}ms`);
+        } else {
+            if (!customerNameResolved) {
+                customerNameResolved = await fetchCustomerNameFromProductionOrder(productionOrder);
+            }
+            inventoryUOM = await fetchItemInventoryUOM(productionOrder.ItemNo);
+        }
+
+        let customerCodeResolved = poCustomerFields.code || productionOrder.U_CustCode || '';
+        if (!customerCodeResolved && productionOrder.U_JobEnt) {
+            const omjdCust = await fetchCustomerFromOmjdJob(productionOrder.U_JobEnt);
+            customerCodeResolved = omjdCust.code || '';
+        }
+
+        // Target produced width (mm) for first-process RM issue estimate.
+        // Cached + best-effort; safe to run in lightweight/material-only loads (issue dialog needs it).
+        let targetWidth = null;
+        try {
+            targetWidth = await fetchProductionOrderTargetWidth(
+                productionOrder.AbsoluteEntry,
+                productionOrder.ItemNo
+            );
+        } catch (twErr) {
+            console.warn('⚠️ Target width lookup failed:', twErr.message);
         }
 
         // Map SAP response to job card format
@@ -4306,12 +4855,18 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
             itemNo: productionOrder.ItemNo,
             productDescription: productionOrder.ProductDescription,
             plannedQuantity: Math.floor(productionOrder.PlannedQuantity || 0),
-            completedQuantity: completedQuantity,  // From header - already in CARTONS for DIE/EMB+P
-            issuedQuantity: issuedQuantity,        // From lines - in SHEETS for DIE/EMB+P (frontend converts)
+            completedQuantity: completedQuantity,  // FG done; Unit1 merges SAP header + local DB batches
+            sapCompletedQuantity: unit1Process ? (headerCompletedQty || 0) : completedQuantity,
+            localCompletedQuantity: unit1Process ? localCompletedQuantity : 0,
+            issuedQuantity: issuedQuantity,        // Unit1: RM issued KGS; Unit2 DIE: sheets on product lines
+            materialIssuedQuantity: matQty.issued,
+            materialPlannedQuantity: matQty.planned,
             uPCode: productionOrder.U_PCode,
             uJobEnt: productionOrder.U_JobEnt,  // For auto-issue linking
-            customerName: customerNameByFirm || '',  // From OITM.FirmCode -> OMRC.FirmName
-            customerCode: productionOrder.U_CustCode || '',  // kept if present in some systems
+            targetWidth: targetWidth,  // mm — produced roll width (OWOR.U_Width / OITM.U_Width), for FBD-RM issue estimate
+            customerName: customerNameResolved || customerNameByFirm || '',  // PO U_CustName → OMJD MJD1.U_PrNa, then OITM FirmName
+            customerCode: customerCodeResolved,
+            inventoryUOM: inventoryUOM || '',
             itemCodeLabel: itemCodeLabel || '',
             absoluteEntry: productionOrder.AbsoluteEntry, // SAP AbsoluteEntry for posting
             baseQuantities: baseQuantities,  // Array of base quantities from order lines (for sheet/carton conversion)
@@ -4482,106 +5037,6 @@ app.get('/api/item-batch-managed/:itemCode', async (req, res) => {
 });
 
 // Get LAM Production Orders with their materials (for analysis)
-app.get('/api/diagnostic/lam-materials', async (req, res) => {
-    try {
-        const { limit = 10 } = req.query;
-
-        console.log(`\n🔍 ========== LAM MATERIALS DIAGNOSTIC ==========`);
-        console.log(`   Fetching ${limit} LAM production orders...`);
-
-        // Query SAP for production orders with U_PCode containing 'LAM' (highest Series per DocumentNumber)
-        const limitNum = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
-        const fetchTop = Math.min(limitNum * 20, 500);
-        const endpoint = `/ProductionOrders?$select=AbsoluteEntry,DocumentNumber,Series,ItemNo,ProductDescription,U_PCode,PlannedQuantity,ProductionOrderStatus,ProductionOrderLines&$filter=contains(U_PCode, 'LAM')&$orderby=Series desc,AbsoluteEntry desc&$top=${fetchTop}`;
-
-        let lamRows;
-        try {
-            const sapData = await sapGetRequest(endpoint);
-            lamRows = dedupeProductionOrdersByHighestSeries(sapData.value || []);
-        } catch (lamErr) {
-            console.warn(`LAM diagnostic query failed (${lamErr.message}), retrying without Series orderby`);
-            const fallbackEndpoint = `/ProductionOrders?$select=AbsoluteEntry,DocumentNumber,Series,ItemNo,ProductDescription,U_PCode,PlannedQuantity,ProductionOrderStatus,ProductionOrderLines&$filter=contains(U_PCode, 'LAM')&$orderby=AbsoluteEntry desc&$top=${fetchTop}`;
-            const sapData = await sapGetRequest(fallbackEndpoint);
-            lamRows = dedupeProductionOrdersByHighestSeries(sapData.value || []);
-        }
-
-        lamRows = lamRows.slice(0, limitNum);
-
-        if (!lamRows || lamRows.length === 0) {
-            return res.json({
-                success: true,
-                message: 'No LAM production orders found',
-                data: []
-            });
-        }
-
-        console.log(`   Found ${lamRows.length} LAM production orders (highest Series per doc #)`);
-
-        // Analyze materials in each PO
-        const results = [];
-        const materialPrefixes = new Set();  // Collect unique material prefixes
-
-        for (const po of lamRows) {
-            const poInfo = {
-                documentNumber: po.DocumentNumber,
-                itemNo: po.ItemNo,
-                productDescription: po.ProductDescription,
-                uPCode: po.U_PCode,
-                plannedQuantity: po.PlannedQuantity,
-                status: po.ProductionOrderStatus,
-                materials: []
-            };
-
-            if (po.ProductionOrderLines && Array.isArray(po.ProductionOrderLines)) {
-                for (const line of po.ProductionOrderLines) {
-                    const plannedQty = line.PlannedQuantity || 0;
-                    const issuedQty = line.IssuedQuantity || 0;
-                    
-                    // Only include lines with positive planned quantity
-                    if (plannedQty > 0) {
-                        const itemCode = line.ItemNo || '';
-                        const prefix = itemCode.substring(0, 3).toUpperCase();
-                        materialPrefixes.add(prefix);
-
-                        poInfo.materials.push({
-                            lineNumber: line.LineNumber,
-                            itemCode: itemCode,
-                            itemName: line.ItemName || '',
-                            prefix: prefix,
-                            plannedQuantity: plannedQty,
-                            issuedQuantity: issuedQty,
-                            needsIssue: issuedQty === 0,
-                            warehouse: line.Warehouse || ''
-                        });
-                    }
-                }
-            }
-
-            results.push(poInfo);
-            console.log(`   PO ${po.DocumentNumber}: ${poInfo.materials.length} materials`);
-        }
-
-        // Summary of material prefixes found
-        const prefixSummary = Array.from(materialPrefixes).sort();
-        console.log(`\n   📦 Material prefixes found in LAM jobs: ${prefixSummary.join(', ')}`);
-        console.log(`=================================================\n`);
-
-        res.json({
-            success: true,
-            count: results.length,
-            materialPrefixes: prefixSummary,
-            data: results
-        });
-
-    } catch (error) {
-        console.error('Error fetching LAM materials:', error.message);
-        res.status(500).json({
-            error: 'Failed to fetch LAM materials',
-            message: error.message
-        });
-    }
-});
-
 // ==================== Validation API Routes ====================
 
 // Validate job completion data (pre-submission validation)
@@ -4664,6 +5119,164 @@ app.get('/api/validate/config', (req, res) => {
 // ==================== Database API Routes ====================
 
 // Complete job with all activities (batch insert)
+/**
+ * Backfill traceability from SAP: read the goods issues linked to a Production
+ * Order and record every consumed roll/batch (even ones issued earlier directly
+ * in SAP), linking them to the produced output batch. Best-effort, non-blocking.
+ */
+async function backfillIssuedRollsFromSAP({ absoluteEntry, poNum, outputBatch, operator, machine }) {
+    if (!absoluteEntry || !outputBatch) return 0;
+    const ae = Number(absoluteEntry);
+
+    // Try linked-document filter first (most reliable), fall back to comment match.
+    // Filters must be URL-encoded — SAP SL rejects raw spaces/colons in lambda.
+    // This B1 Service Layer rejects DocumentLines/any() lambda filters, so we
+    // (1) try a cheap comment match, then (2) scan recent goods issues and match
+    // the production order's AbsoluteEntry client-side (no lambda required).
+    const enc = (f) => f.replace(/ /g, '%20').replace(/:/g, '%3A');
+    let docs = [];
+
+    // (1) Comment match — works for app-issued material (PO embedded in Comments)
+    try {
+        const resp = await sapGetRequest(
+            `/InventoryGenExits?$select=DocEntry,Comments,DocumentLines&$filter=${enc(`contains(Comments,'${poNum}')`)}&$orderby=DocEntry desc&$top=30`
+        );
+        if (resp && Array.isArray(resp.value) && resp.value.length > 0) docs = resp.value;
+    } catch (e) {
+        console.log(`   ⚠️ Traceability comment-match query failed: ${e.message}`);
+    }
+
+    // (2) Recent goods-issue scan — catches material issued directly in SAP too
+    const hasMatch = (list) => list.some(d =>
+        (d.DocumentLines || []).some(l => Number(l.BaseEntry) === ae));
+    if (!hasMatch(docs)) {
+        try {
+            const resp = await sapGetRequest(
+                `/InventoryGenExits?$select=DocEntry,DocumentLines&$orderby=DocEntry desc&$top=400`
+            );
+            if (resp && Array.isArray(resp.value)) docs = resp.value;
+        } catch (e) {
+            console.log(`   ⚠️ Traceability recent-scan query failed: ${e.message}`);
+        }
+    }
+
+    // Keep only goods issues that actually consume this PO, then fetch each in
+    // full ($select strips nested BatchNumbers, so a per-doc detail GET is needed).
+    const matchedEntries = [...new Set(
+        docs.filter(d => (d.DocumentLines || []).some(l => Number(l.BaseEntry) === ae))
+            .map(d => d.DocEntry)
+    )];
+
+    if (matchedEntries.length === 0) {
+        console.log(`   ℹ️ No SAP goods issues found to backfill traceability for PO ${poNum}`);
+        return 0;
+    }
+
+    const fullDocs = [];
+    for (const de of matchedEntries) {
+        try {
+            const full = await sapGetRequest(`/InventoryGenExits(${de})`);
+            if (full) fullDocs.push(full);
+        } catch (e) {
+            console.log(`   ⚠️ Could not fetch goods issue ${de}: ${e.message}`);
+        }
+    }
+
+    let recorded = 0;
+    for (const doc of fullDocs) {
+        const lines = Array.isArray(doc.DocumentLines) ? doc.DocumentLines : [];
+        for (const line of lines) {
+            // Only lines that belong to this production order
+            if (Number(line.BaseEntry) !== ae) continue;
+            const itemCode = line.ItemCode || '';
+            const warehouse = line.WarehouseCode || line.Warehouse || null;
+            const batches = Array.isArray(line.BatchNumbers) ? line.BatchNumbers : [];
+
+            if (batches.length > 0) {
+                for (const b of batches) {
+                    const id = await recordMaterialIssueIfAbsent({
+                        po_num: poNum,
+                        absolute_entry: ae,
+                        line_number: line.BaseLine,
+                        item_code: itemCode,
+                        batch_number: b.BatchNumber,
+                        quantity: b.Quantity,
+                        warehouse,
+                        operator_name: operator || null,
+                        machine_name: machine || null,
+                        sap_doc_entry: doc.DocEntry,
+                        output_batch: outputBatch,
+                        remarks: 'Backfilled from SAP goods issue'
+                    });
+                    if (id) recorded++;
+                }
+            } else if (itemCode) {
+                // Non-batch consumable (e.g. some glue/chemicals) — record qty only
+                const id = await recordMaterialIssueIfAbsent({
+                    po_num: poNum,
+                    absolute_entry: ae,
+                    line_number: line.BaseLine,
+                    item_code: itemCode,
+                    batch_number: `(${itemCode})`,
+                    quantity: line.Quantity,
+                    warehouse,
+                    operator_name: operator || null,
+                    machine_name: machine || null,
+                    sap_doc_entry: doc.DocEntry,
+                    output_batch: outputBatch,
+                    remarks: 'Backfilled from SAP goods issue (non-batch)'
+                });
+                if (id) recorded++;
+            }
+        }
+    }
+    console.log(`   🧬 Traceability backfill: recorded ${recorded} roll(s) for output batch ${outputBatch} (PO ${poNum})`);
+    return recorded;
+}
+
+/**
+ * Build traceability for a PO on demand: resolve its AbsoluteEntry from SAP, find
+ * the output batch(es) produced locally, and backfill consumed rolls for each.
+ * Returns { recorded, absoluteEntry, outputBatches }.
+ */
+async function ensureTraceabilityForPO(poNum) {
+    const po = String(poNum || '').trim();
+    if (!po) return { recorded: 0, absoluteEntry: null, outputBatches: [] };
+
+    // Resolve AbsoluteEntry from SAP
+    const poResp = await sapGetRequest(
+        `/ProductionOrders?$filter=DocumentNumber eq ${po}&$select=AbsoluteEntry,DocumentNumber&$top=1`
+    );
+    const absoluteEntry = poResp?.value?.[0]?.AbsoluteEntry;
+    if (!absoluteEntry) {
+        return { recorded: 0, absoluteEntry: null, outputBatches: [], notFound: true };
+    }
+
+    // Find output batch(es) already produced for this PO
+    const [batchRows] = await pool.query(
+        `SELECT DISTINCT batch_num, MAX(operator_name) AS operator_name, MAX(machine_name) AS machine_name
+           FROM production_records WHERE po_num = ? GROUP BY batch_num`,
+        [po]
+    );
+
+    let total = 0;
+    for (const row of batchRows) {
+        total += await backfillIssuedRollsFromSAP({
+            absoluteEntry,
+            poNum: po,
+            outputBatch: row.batch_num,
+            operator: row.operator_name,
+            machine: row.machine_name
+        });
+    }
+
+    return {
+        recorded: total,
+        absoluteEntry,
+        outputBatches: batchRows.map(r => r.batch_num)
+    };
+}
+
 app.post('/api/job-complete', async (req, res) => {
     try {
         const { jobData, activities } = req.body;
@@ -4751,7 +5364,76 @@ app.post('/api/job-complete', async (req, res) => {
         }
 
         // All validations passed - insert job to local database
+        const isUnit1JobComplete = isUnit1ProcessCode(jobData.u_pcode || jobData.uPCode || jobData.process_code) ||
+            isUnit1Machine(jobData.machine_name);
+        const fgForBatch = (jobData.fg_num || jobData.item_no || '').trim();
+
+        if (isUnit1JobComplete && fgForBatch) {
+            jobData.use_item_code_batch = true;
+            if (!jobData.u_pcode && !jobData.uPCode && jobData.absolute_entry) {
+                try {
+                    const poHead = await sapGetRequest(
+                        `/ProductionOrders(${jobData.absolute_entry})?$select=U_PCode,ItemNo`
+                    );
+                    jobData.u_pcode = poHead.U_PCode || '';
+                    if (!fgForBatch && poHead.ItemNo) {
+                        jobData.fg_num = poHead.ItemNo;
+                    }
+                } catch (uErr) {
+                    console.warn('   Could not fetch U_PCode for batch tag:', uErr.message);
+                }
+            }
+            jobData._batch_process_tag = getUnit1ProcessBatchTag(
+                jobData.u_pcode || jobData.uPCode || jobData.process_code,
+                jobData.process_name,
+                jobData.machine_name,
+                fgForBatch
+            );
+            try {
+                jobData._sap_batch_seq = await getSapMaxItemBatchSeq(fgForBatch, jobData._batch_process_tag);
+                console.log(`   Unit 1 batch format: ${fgForBatch}-${jobData._batch_process_tag}-### (SAP max seq: ${jobData._sap_batch_seq})`);
+            } catch (seqErr) {
+                console.warn('   SAP batch seq lookup skipped:', seqErr.message);
+                jobData._sap_batch_seq = 0;
+            }
+        }
+
+        const duplicateCompletion = await findRecentDuplicateJobCompletion(
+            jobData.po_num,
+            jobData.job_start_time,
+            jobData.quantity_processed
+        );
+        if (duplicateCompletion) {
+            console.warn(`⚠️ Duplicate job-complete ignored for PO ${jobData.po_num} (batch ${duplicateCompletion.batch_num})`);
+            return res.json({
+                success: true,
+                duplicate: true,
+                batch_num: duplicateCompletion.batch_num,
+                inserted: 0,
+                message: 'Duplicate submit ignored — job already saved',
+                validationPassed: true,
+                sapPosted: false,
+                sapError: null
+            });
+        }
+
         const result = await insertJobActivities(jobData, activities);
+
+        // Traceability: link app-captured input rolls + backfill consumed batches from SAP
+        if (result?.batch_num) {
+            await linkOutputBatchToIssues(jobData.po_num, result.batch_num);
+            try {
+                await backfillIssuedRollsFromSAP({
+                    absoluteEntry: jobData.absolute_entry,
+                    poNum: jobData.po_num,
+                    outputBatch: result.batch_num,
+                    operator: jobData.operator_name,
+                    machine: jobData.machine_name
+                });
+            } catch (traceErr) {
+                console.warn('⚠️ Traceability backfill error (non-blocking):', traceErr.message);
+            }
+        }
 
         // ========== ADH / LAM MATERIAL ISSUE (before SAP report completion) ==========
         let lamIssueResult = null;
@@ -4789,28 +5471,41 @@ app.post('/api/job-complete', async (req, res) => {
         const isJumbledJob = jobData.is_jumbled_job ||
             (jobData.fg_lines && Array.isArray(jobData.fg_lines) && jobData.fg_lines.length > 1);
 
-        // ========== RESOURCE LINE + ISSUE (before SAP report completion) ==========
+        // ========== RESOURCE LINE + ISSUE (Unit 2 only — Unit 1 has no resources) ==========
         let resourceIssueResult = null;
 
         if (jobData.absolute_entry) {
-            resourceIssueResult = await ensureAndIssueProductionResource({
-                absoluteEntry: jobData.absolute_entry,
-                documentNumber: jobData.po_num,
-                machineName: jobData.machine_name,
-                startTime: jobData.job_start_time,
-                endTime: jobData.job_end_time,
-                remarks: `Resource issue for PO ${jobData.po_num} - Machine: ${jobData.machine_name || 'Unknown'} - Operator: ${jobData.operator_name || 'Unknown'}`
-            });
+            const isUnit1Job = isUnit1ProcessCode(jobData.u_pcode || jobData.uPCode) ||
+                isUnit1Machine(jobData.machine_name);
 
-            if (!resourceIssueResult.success) {
-                if (isJumbledJob) {
-                    console.warn('⚠️ Jumbled job — resource issue failed (continuing to report completion):', resourceIssueResult.error);
-                    resourceIssueResult = { ...resourceIssueResult, skipped: true };
-                } else {
-                    throw new Error(`Resource issue failed before report completion: ${resourceIssueResult.error || 'Unknown error'}`);
+            if (isUnit1Job) {
+                try {
+                    const stripResult = await removeUnit1ResourceLinesFromPO(jobData.absolute_entry);
+                    console.log('ℹ️ Unit 1 — all resource lines removed; resource issue skipped', stripResult);
+                } catch (stripErr) {
+                    console.warn('⚠️ Could not strip Unit 1 resource lines:', stripErr.message);
                 }
+                resourceIssueResult = { success: true, skipped: true, reason: 'unit1_no_resources' };
             } else {
-                console.log('✅ Resource line/issue completed before SAP report completion');
+                resourceIssueResult = await ensureAndIssueProductionResource({
+                    absoluteEntry: jobData.absolute_entry,
+                    documentNumber: jobData.po_num,
+                    machineName: jobData.machine_name,
+                    startTime: jobData.job_start_time,
+                    endTime: jobData.job_end_time,
+                    remarks: `Resource issue for PO ${jobData.po_num} - Machine: ${jobData.machine_name || 'Unknown'} - Operator: ${jobData.operator_name || 'Unknown'}`
+                });
+
+                if (!resourceIssueResult.success) {
+                    if (isJumbledJob) {
+                        console.warn('⚠️ Jumbled job — resource issue failed (continuing to report completion):', resourceIssueResult.error);
+                        resourceIssueResult = { ...resourceIssueResult, skipped: true };
+                    } else {
+                        throw new Error(`Resource issue failed before report completion: ${resourceIssueResult.error || 'Unknown error'}`);
+                    }
+                } else {
+                    console.log('✅ Resource line/issue completed before SAP report completion');
+                }
             }
         } else {
             console.log('ℹ️ No absoluteEntry - resource line/issue skipped');
@@ -4868,6 +5563,9 @@ app.post('/api/job-complete', async (req, res) => {
 
                     if (sapResult.success) {
                         console.log(`✅ Jumbled job SAP posting successful - ${sapResult.linesPosted} line(s) posted`);
+                        if (jobData.po_num) {
+                            clearPOLocalReset(String(jobData.po_num)).catch(() => {});
+                        }
                     } else {
                         console.warn('⚠️ Jumbled job SAP posting failed:', sapResult.error);
                     }
@@ -4886,7 +5584,8 @@ app.post('/api/job-complete', async (req, res) => {
                     batchNumber: result.batch_num,
                     batchComments: jobData.remark || '',
                     operatorName: jobData.operator_name || '',
-                    itemCode: jobData.fg_num || jobData.item_no || '',  // Item code for batch update
+                    itemCode: jobData.fg_num || jobData.item_no || '',
+                    uPCode: jobData.u_p_code || jobData.uPCode || '',
                     machineName: jobData.machine_name || '',
                     startTime: jobData.job_start_time || '',
                     endTime: jobData.job_end_time || '',
@@ -4903,6 +5602,11 @@ app.post('/api/job-complete', async (req, res) => {
 
                 if (sapResult.success) {
                     console.log('✅ SAP posting successful');
+                    if (jobData.po_num) {
+                        clearPOLocalReset(String(jobData.po_num)).catch((err) => {
+                            console.warn('⚠️ Could not clear PO local reset flag:', err.message);
+                        });
+                    }
                 } else {
                     console.warn('⚠️ SAP posting failed:', sapResult.error);
                 }
@@ -4995,39 +5699,32 @@ app.post('/api/job-complete', async (req, res) => {
                                 targetProcess: nextPO.uPCode
                             };
                         } else {
-                            // Step 2: Issue using the batch we just created
-                            console.log('📋 Step 2: Issuing materials to next process...');
+                            console.log('📋 Step 2: Reconciling auto-issue gap (SAP completed − next PO issued)...');
 
-                            const batchToIssue = result.batch_num;
-                            console.log(`   Using batch from production: ${batchToIssue}`);
+                            const autoIssueWarehouse =
+                                sapResult?.warehouseCode ||
+                                nextPO.targetLine?.warehouse ||
+                                getUnit1OutputWarehouse(uPCode, finishedItemCode);
 
-                            // Use quantity_for_sap if available (includes UPs), otherwise use quantity_processed
-                            const quantityToIssue = jobData.quantity_for_sap || jobData.quantity_processed;
-                            console.log(`   Quantity processed: ${jobData.quantity_processed}`);
-                            console.log(`   Quantity for SAP: ${jobData.quantity_for_sap || 'N/A'}`);
-                            console.log(`   Quantity to issue: ${quantityToIssue}`);
-
-                            nextProcessResult = await issueToNextProcessFIFO({
-                                nextPOAbsoluteEntry: nextPO.absoluteEntry,
-                                nextPODocNumber: nextPO.documentNumber,
-                                nextPOPlannedQty: nextPO.plannedQuantity,
-                                nextPOLines: nextPO.productionOrderLines,
-                                targetLine: nextPO.targetLine,  // Use the specific line found
-                                itemCode: finishedItemCode,
-                                producedQty: quantityToIssue,
-                                batchNumber: batchToIssue,
+                            nextProcessResult = await reconcileAutoIssueGap({
+                                sourceAbsoluteEntry: jobData.absolute_entry,
+                                sourceDocNumber: jobData.po_num,
+                                uJobEnt,
+                                finishedItemCode,
+                                sourceWarehouse: autoIssueWarehouse,
+                                uPCode,
                                 remarks: `Auto-issue from ${uPCode} PO ${jobData.po_num} to ${nextPO.uPCode} PO ${nextPO.documentNumber}`
                             });
 
-                            if (nextProcessResult.success) {
-                                console.log(`✅ Auto-issued ${nextProcessResult.totalIssued} units to ${nextPO.uPCode} PO ${nextPO.documentNumber}`);
-                                nextProcessResult.targetPO = nextPO.documentNumber;
-                                nextProcessResult.targetProcess = nextPO.uPCode;
+                            if (nextProcessResult.success && !nextProcessResult.skipped) {
+                                console.log(`✅ Auto-issued ${nextProcessResult.totalIssued} units (gap reconcile) to ${nextPO.uPCode} PO ${nextPO.documentNumber}`);
+                            } else if (nextProcessResult.skipped) {
+                                console.log(`ℹ️ Auto-issue reconcile skipped: ${nextProcessResult.message || 'in sync'}`);
                             } else {
-                                console.warn('⚠️ Auto-issue to next process failed:', nextProcessResult.error);
-                                nextProcessResult.targetPO = nextPO.documentNumber;
-                                nextProcessResult.targetProcess = nextPO.uPCode;
+                                console.warn('⚠️ Auto-issue reconcile failed:', nextProcessResult.error);
                             }
+                            nextProcessResult.targetPO = nextPO.documentNumber;
+                            nextProcessResult.targetProcess = nextPO.uPCode;
                         }
                     } else {
                         console.log(`ℹ️ No next process PO found requiring item ${finishedItemCode}`);
@@ -5157,6 +5854,13 @@ app.post('/api/test-sap-post', async (req, res) => {
 
         console.log('🧪 Testing SAP posting with absoluteEntry:', absoluteEntry);
 
+        try {
+            const strip = await removeUnit1ResourceLinesFromPO(absoluteEntry);
+            console.log('🧪 Strip Unit1 resource lines:', strip);
+        } catch (stripErr) {
+            console.warn('🧪 Strip failed:', stripErr.message);
+        }
+
         const testData = {
             absoluteEntry: absoluteEntry,
             quantity: quantity || 1,
@@ -5224,6 +5928,38 @@ app.get('/api/batches/po/:poNum', async (req, res) => {
         console.error('Error fetching batches:', error);
         res.status(500).json({
             error: 'Failed to fetch batches',
+            message: error.message
+        });
+    }
+});
+
+/**
+ * DELETE /api/local-data/po/:poNum
+ * Remove local production_records for a PO (does not touch SAP).
+ * Use when test/failed completions inflated Already Done without SAP posting.
+ */
+app.delete('/api/local-data/po/:poNum', async (req, res) => {
+    try {
+        const poNum = String(req.params.poNum || '').trim();
+        if (!poNum) {
+            return res.status(400).json({ success: false, error: 'PO number is required' });
+        }
+
+        const result = await deleteRecordsByPO(poNum);
+        console.log(`🗑️ Cleared local data for PO ${poNum}: ${result.deleted} row(s), batches: ${result.batches.join(', ') || 'none'}`);
+
+        res.json({
+            success: true,
+            poNum,
+            deletedRows: result.deleted,
+            batchesRemoved: result.batches,
+            message: `Local data cleared for PO ${poNum}. Reload the job from SAP to refresh quantities.`
+        });
+    } catch (error) {
+        console.error('Error clearing local PO data:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to clear local PO data',
             message: error.message
         });
     }
@@ -5614,7 +6350,7 @@ app.get('/api/rmc-batches/:itemCode', async (req, res) => {
     try {
         const itemCode = decodeURIComponent((req.params.itemCode || '').toString().trim());
         const whRaw = (req.query.warehouse || '').toString().trim();
-        const warehouse = whRaw || 'II-FOI';
+        const warehouse = whRaw || UNIT1_DEFAULT_ISSUE_WAREHOUSE;
 
         if (!itemCode) {
             return res.status(400).json({
@@ -5731,13 +6467,203 @@ app.post('/api/release-production-order', async (req, res) => {
 });
 
 /**
+ * GET /api/traceability/:po
+ * Returns input rolls/batches issued for a PO, grouped by produced output batch.
+ * Optional ?batch=OUTPUT-BATCH to reverse-trace a specific output batch.
+ */
+app.get('/api/traceability/:po', async (req, res) => {
+    try {
+        const poNum = req.params.po;
+        const outputBatch = (req.query.batch || '').toString().trim();
+        const noAuto = String(req.query.noAuto || '') === '1';
+
+        let rows = outputBatch
+            ? await getTraceabilityByOutputBatch(outputBatch)
+            : await getTraceabilityByPO(poNum);
+
+        // Auto-pull from SAP the first time a PO is traced (no local rows yet).
+        if (!outputBatch && rows.length === 0 && !noAuto) {
+            try {
+                const ensured = await ensureTraceabilityForPO(poNum);
+                if (ensured.recorded > 0) {
+                    rows = await getTraceabilityByPO(poNum);
+                }
+            } catch (autoErr) {
+                console.warn(`⚠️ Auto-traceability for PO ${poNum} failed:`, autoErr.message);
+            }
+        }
+
+        // Group issued rolls under their output batch (unlinked → "pending")
+        const groups = {};
+        for (const r of rows) {
+            const key = r.output_batch || '__pending__';
+            if (!groups[key]) {
+                groups[key] = { outputBatch: r.output_batch || null, inputs: [], totalQty: 0 };
+            }
+            groups[key].inputs.push({
+                itemCode: r.item_code,
+                batchNumber: r.batch_number,
+                quantity: Number(r.quantity) || 0,
+                warehouse: r.warehouse,
+                lineNumber: r.line_number,
+                operator: r.operator_name,
+                machine: r.machine_name,
+                sapDocEntry: r.sap_doc_entry,
+                issuedAt: r.issued_at
+            });
+            groups[key].totalQty += Number(r.quantity) || 0;
+        }
+
+        return res.json({
+            success: true,
+            poNum,
+            outputBatch: outputBatch || null,
+            count: rows.length,
+            genealogy: Object.values(groups)
+        });
+    } catch (error) {
+        console.error('Traceability fetch error:', error.message);
+        return res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+/**
+ * POST /api/traceability/backfill/:po
+ * Re-build traceability for an already-finished PO by reading its goods issues
+ * from SAP and linking consumed rolls to the output batch(es) in local records.
+ */
+app.post('/api/traceability/backfill/:po', async (req, res) => {
+    try {
+        const poNum = req.params.po;
+        const ensured = await ensureTraceabilityForPO(poNum);
+        if (ensured.notFound) {
+            return res.status(404).json({ success: false, message: `PO ${poNum} not found in SAP` });
+        }
+        if (!ensured.outputBatches.length) {
+            return res.status(404).json({ success: false, message: `No produced output batch found locally for PO ${poNum}` });
+        }
+        return res.json({
+            success: true,
+            poNum,
+            absoluteEntry: ensured.absoluteEntry,
+            outputBatches: ensured.outputBatches,
+            recorded: ensured.recorded
+        });
+    } catch (error) {
+        console.error('Traceability backfill error:', error.message);
+        return res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+/**
+ * POST /api/auto-issue-material
+ * FIFO auto-issue one BOM line to the current PO (Unit 1 subsequent processes).
+ * No batch popup — oldest batches first from the line warehouse.
+ */
+app.post('/api/auto-issue-material', async (req, res) => {
+    try {
+        const {
+            absoluteEntry,
+            documentNumber,
+            itemCode,
+            lineNumber,
+            warehouse,
+            quantity
+        } = req.body || {};
+
+        const absEntry = Number(absoluteEntry);
+        const qtyNeeded = Number(quantity);
+        const code = String(itemCode || '').trim();
+        const wh = String(warehouse || '').trim() || UNIT1_DEFAULT_ISSUE_WAREHOUSE;
+
+        if (!Number.isFinite(absEntry) || absEntry <= 0 || !code || !Number.isFinite(qtyNeeded) || qtyNeeded <= 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'absoluteEntry, itemCode, and positive quantity are required'
+            });
+        }
+
+        console.log(`\n🔄 ========== AUTO-ISSUE MATERIAL ==========`);
+        console.log(`   PO: ${documentNumber || absEntry} | Item: ${code} | Qty: ${qtyNeeded} | WH: ${wh}`);
+
+        const releaseResult = await releaseProductionOrder(absEntry, documentNumber);
+        if (!releaseResult.success) {
+            return res.status(400).json({
+                success: false,
+                error: `Failed to release PO: ${releaseResult.error}`
+            });
+        }
+
+        const { allocations, shortfall } = await allocateFifoBatchesFromWarehouse(code, wh, qtyNeeded);
+        if (!allocations.length) {
+            return res.json({
+                success: false,
+                issued: 0,
+                shortfall: qtyNeeded,
+                message: `No stock in ${wh} for ${code}`
+            });
+        }
+
+        let resolvedLineNumber = lineNumber;
+        if (resolvedLineNumber === undefined || resolvedLineNumber === null) {
+            const poData = await sapGetRequest(`/ProductionOrders(${absEntry})?$select=ProductionOrderLines`);
+            const matchLine = (poData?.ProductionOrderLines || []).find(
+                (l) => String(l.ItemNo || '').trim() === code
+            );
+            if (matchLine) resolvedLineNumber = matchLine.LineNumber;
+        }
+
+        const issuedQty = allocations.reduce((sum, a) => sum + (Number(a.quantity) || 0), 0);
+        const currentDate = getSAPPostingDate();
+        const linkedPayload = {
+            DocDate: currentDate,
+            BPLID: SAP_BPL_ID,
+            BPL_IDAssignedToInvoice: SAP_BPL_ID,
+            Comments: `Auto-issue FIFO via Data Entry (PO ${documentNumber || absEntry})`,
+            DocumentLines: [{
+                BaseType: 202,
+                BaseEntry: absEntry,
+                BaseLine: resolvedLineNumber ?? 0,
+                Quantity: issuedQty,
+                WarehouseCode: wh,
+                TransactionType: 'botrntIssue',
+                BatchNumbers: allocations.map((a) => ({
+                    BatchNumber: a.batchNumber,
+                    Quantity: a.quantity
+                }))
+            }]
+        };
+
+        const issueResult = await sapPostRequest('/InventoryGenExits', linkedPayload);
+        console.log(`   ✅ Auto-issued ${issuedQty} (${allocations.length} batch(es)), shortfall ${shortfall}`);
+
+        res.json({
+            success: true,
+            issued: issuedQty,
+            shortfall,
+            partial: shortfall > 1e-6,
+            batchAllocations: allocations,
+            docEntry: issueResult?.DocEntry,
+            warehouse: wh
+        });
+    } catch (error) {
+        console.error('❌ Auto-issue material failed:', error.message);
+        res.status(500).json({
+            success: false,
+            error: extractSapErrorMessage(error),
+            message: error.message
+        });
+    }
+});
+
+/**
  * POST /api/issue-rmc-batches
  * Issue RMC material from user-selected batches
  * Allows user to specify exact quantities from specific batches
  */
 app.post('/api/issue-rmc-batches', async (req, res) => {
     try {
-        const { absoluteEntry, documentNumber, itemCode, lineNumber, batchAllocations, remarks, itemCodeChanged, originalItemCode, targetWarehouse, warehouse } = req.body;
+        const { absoluteEntry, documentNumber, itemCode, lineNumber, batchAllocations, remarks, itemCodeChanged, originalItemCode, targetWarehouse, warehouse, operatorName, machineName } = req.body;
         
         console.log(`📤 ========== RMC BATCH ISSUE ==========`);
         console.log(`   PO AbsoluteEntry: ${absoluteEntry}`);
@@ -5765,8 +6691,7 @@ app.post('/api/issue-rmc-batches', async (req, res) => {
             });
         }
         
-        const inferredWarehouse = (itemCode || '').toUpperCase().startsWith('FIL') ? 'II-LAM' : 'II-FOI';
-        const targetWhs = targetWarehouse || warehouse || inferredWarehouse;
+        const targetWhs = targetWarehouse || warehouse || UNIT1_DEFAULT_ISSUE_WAREHOUSE;
         const poReference = documentNumber || absoluteEntry;
         const currentDate = getSAPPostingDate();
         
@@ -5883,8 +6808,8 @@ app.post('/api/issue-rmc-batches', async (req, res) => {
         // Build linked payload
         const linkedPayload = {
             DocDate: currentDate,
-            BPLID: 3,
-            BPL_IDAssignedToInvoice: 3,
+            BPLID: SAP_BPL_ID,
+            BPL_IDAssignedToInvoice: SAP_BPL_ID,
             Comments: remarks || `RMC material issued via Data Entry WebApp (PO: ${poReference})`,
             DocumentLines: [{
                 BaseType: 202,
@@ -5900,8 +6825,8 @@ app.post('/api/issue-rmc-batches', async (req, res) => {
         // Build standalone payload
         const standalonePayload = {
             DocDate: currentDate,
-            BPLID: 3,
-            BPL_IDAssignedToInvoice: 3,
+            BPLID: SAP_BPL_ID,
+            BPL_IDAssignedToInvoice: SAP_BPL_ID,
             Comments: remarks || `RMC material issued via Data Entry WebApp (PO: ${poReference}, item changed)`,
             DocumentLines: [{
                 ItemCode: itemCode,
@@ -5976,7 +6901,23 @@ app.post('/api/issue-rmc-batches', async (req, res) => {
         
         if (issueSucceeded) {
             console.log('==========================================');
-            
+
+            // Traceability: record each issued roll/batch against this PO (non-blocking)
+            await recordMaterialIssues(
+                {
+                    po_num: documentNumber || absoluteEntry,
+                    absolute_entry: absoluteEntry,
+                    line_number: lineNumber,
+                    item_code: itemCode,
+                    warehouse: targetWhs,
+                    operator_name: operatorName || null,
+                    machine_name: machineName || null,
+                    sap_doc_entry: issueResult?.DocEntry,
+                    remarks: remarks || null
+                },
+                batchAllocations
+            );
+
             return res.json({
                 success: true,
                 message: 'RMC material issued successfully',
@@ -6007,7 +6948,7 @@ app.post('/api/issue-rmc-batches', async (req, res) => {
  */
 app.post('/api/issue-material', async (req, res) => {
     try {
-        const { absoluteEntry, documentNumber, itemCode, quantity, warehouse, lineNumber, remarks, itemCodeChanged, originalItemCode } = req.body;
+        const { absoluteEntry, documentNumber, itemCode, quantity, warehouse, lineNumber, remarks, itemCodeChanged, originalItemCode, operatorName, machineName } = req.body;
         
         // Determine material type and target warehouse
         const isPMT = itemCode && itemCode.toUpperCase().startsWith('PMT');
@@ -6020,11 +6961,11 @@ app.post('/api/issue-material', async (req, res) => {
         // Set target warehouse based on material type
         let targetWarehouse;
         if (isPMT) {
-            targetWarehouse = 'II-PST';
+            targetWarehouse = warehouse || UNIT1_DEFAULT_ISSUE_WAREHOUSE;
         } else if (isRMC) {
-            targetWarehouse = 'II-FOI';
+            targetWarehouse = warehouse || UNIT1_DEFAULT_ISSUE_WAREHOUSE;
         } else {
-            targetWarehouse = warehouse || 'II-PST';  // Default fallback
+            targetWarehouse = warehouse || UNIT1_DEFAULT_ISSUE_WAREHOUSE;
         }
         
         // Track if we successfully updated the PO line (for linked issue)
@@ -6343,8 +7284,8 @@ app.post('/api/issue-material', async (req, res) => {
                     // Build linked payload (for normal issue or tryLinkedFirst)
                     const linkedPayload = {
                         DocDate: currentDate,
-                        BPLID: 3,
-                        BPL_IDAssignedToInvoice: 3,
+                        BPLID: SAP_BPL_ID,
+                        BPL_IDAssignedToInvoice: SAP_BPL_ID,
                         Comments: remarks || `${materialType} material issued via Data Entry WebApp (PO: ${poReference})`,
                         DocumentLines: [{
                             BaseType: 202,
@@ -6414,8 +7355,8 @@ app.post('/api/issue-material', async (req, res) => {
                     // Build linked payload
                     const linkedPayload = {
                         DocDate: currentDate,
-                        BPLID: 3,
-                        BPL_IDAssignedToInvoice: 3,
+                        BPLID: SAP_BPL_ID,
+                        BPL_IDAssignedToInvoice: SAP_BPL_ID,
                         Comments: remarks || `${materialType} material issued via Data Entry WebApp (PO: ${poReference})`,
                         DocumentLines: [{
                             BaseType: 202,
@@ -6483,7 +7424,22 @@ app.post('/api/issue-material', async (req, res) => {
                 console.log(`✅ Successfully issued ${totalIssued} units of ${itemCode} from ${targetWarehouse}`);
                 console.log(`   Batches used: ${batchesUsed.map(b => `${b.batch}(${b.quantity})`).join(', ')}`);
                 console.log('========================================');
-                
+
+                // Traceability: record each batch consumed against this PO (non-blocking)
+                await recordMaterialIssues(
+                    {
+                        po_num: documentNumber || absoluteEntry,
+                        absolute_entry: absoluteEntry,
+                        line_number: resolvedBaseLine,
+                        item_code: itemCode,
+                        warehouse: targetWarehouse,
+                        operator_name: operatorName || null,
+                        machine_name: machineName || null,
+                        remarks: remarks || null
+                    },
+                    batchesUsed
+                );
+
                 return res.json({
                     success: true,
                     message: `Successfully issued ${totalIssued} units of ${itemCode} from ${targetWarehouse}`,
@@ -6516,8 +7472,8 @@ app.post('/api/issue-material', async (req, res) => {
             if (useStandaloneIssue) {
                 const standalonePayload = {
                     DocDate: currentDate,
-                    BPLID: 3,
-                    BPL_IDAssignedToInvoice: 3,
+                    BPLID: SAP_BPL_ID,
+                    BPL_IDAssignedToInvoice: SAP_BPL_ID,
                     Comments: remarks || `${materialType} material issued via Data Entry WebApp`,
                     DocumentLines: [{
                         ItemCode: itemCode,
@@ -6545,8 +7501,8 @@ app.post('/api/issue-material', async (req, res) => {
             // If that fails due to backflush error, try standalone issue
             let issuePayload = {
                 DocDate: currentDate,
-                BPLID: 3,
-                BPL_IDAssignedToInvoice: 3,
+                BPLID: SAP_BPL_ID,
+                BPL_IDAssignedToInvoice: SAP_BPL_ID,
                 Comments: remarks || `${materialType} material issued via Data Entry WebApp`,
                 DocumentLines: [{
                     BaseType: 202,
@@ -6588,8 +7544,8 @@ app.post('/api/issue-material', async (req, res) => {
 
                     const standalonePayload = {
                         DocDate: currentDate,
-                        BPLID: 3,
-                        BPL_IDAssignedToInvoice: 3,
+                        BPLID: SAP_BPL_ID,
+                        BPL_IDAssignedToInvoice: SAP_BPL_ID,
                         Comments: remarks || `${materialType} material issued via Data Entry WebApp (PO: ${absoluteEntry})`,
                         DocumentLines: [{
                             ItemCode: itemCode,
@@ -6701,460 +7657,6 @@ app.post('/api/appsheet/breakdown-ticket', async (req, res) => {
     }
 });
 
-// ==================== Finished Goods (FG) Entry API ====================
-
-/**
- * POST /api/fg-entry
- * Submit Finished Goods entry to SAP and MySQL.
- * FG is a terminal process: SAP report completion only (botrntComplete) — no resource issue,
- * no auto-issue to the next production order (those run only via POST /api/job-complete).
- * - SAP: InventoryGenEntries report completion on the FG PO
- * - MySQL: QC Supervisor as operator_name, packing details in remarks
- * - Labels: auto-print to Zebra when enabled
- */
-app.post('/api/fg-entry', async (req, res) => {
-    try {
-        const {
-            poNumber,
-            absoluteEntry,
-            itemCode,
-            productDescription,
-            plannedQuantity,
-            completedQuantity,
-            fgQuantity,
-            packingDetails,
-            qcSupervisor,
-            operatorName,
-            remarks,
-            pkdDetails,
-            entryTimestamp
-        } = req.body;
-
-        console.log('\n📦 ========== FINISHED GOODS ENTRY ==========');
-        console.log(`   PO Number: ${poNumber}`);
-        console.log(`   Absolute Entry: ${absoluteEntry}`);
-        console.log(`   Item Code: ${itemCode}`);
-        console.log(`   FG Quantity: ${fgQuantity}`);
-        console.log(`   Packing Detail (Cartons/CFC): ${packingDetails}`);
-        console.log(`   QC Supervisor: ${qcSupervisor}`);
-        console.log(`   Remarks: ${remarks || 'N/A'}`);
-        console.log(`   PKD Details: ${pkdDetails || 'N/A'}`);
-
-        // Validate required fields
-        if (!poNumber || !fgQuantity || !qcSupervisor || !packingDetails) {
-            return res.status(400).json({
-                error: 'Missing required fields',
-                message: 'poNumber, fgQuantity, qcSupervisor, and packingDetails are required'
-            });
-        }
-
-        // Format posting date/time
-        const currentDate = getSAPPostingDate();
-        const currentTime = new Date().toLocaleTimeString('en-IN', { 
-            hour: '2-digit', 
-            minute: '2-digit',
-            hour12: false 
-        });
-
-        // Format timestamp for MySQL (YYYY-MM-DD HH:MM:SS)
-        const now = new Date();
-        const mysqlTimestamp = now.toISOString().slice(0, 19).replace('T', ' ');
-
-        // Build remarks string for MySQL (includes packing details and PKD details)
-        let fullRemarks = `Packing Detail (Cartons/CFC): ${packingDetails}`;
-        if (pkdDetails) {
-            fullRemarks += ` | PKD: ${pkdDetails}`;
-        }
-        if (remarks) {
-            fullRemarks += ` | ${remarks}`;
-        }
-
-        // ========== 1. Save to MySQL Database ==========
-        // This will generate the batch number using the same series as data entry webapp
-        let dbResult = null;
-        let batchNumber = null;
-        try {
-            console.log('\n   📊 Saving to MySQL database...');
-            console.log(`   Using timestamp: ${mysqlTimestamp}`);
-            
-            const jobData = {
-                po_num: poNumber,
-                fg_num: itemCode,
-                job_name: productDescription,
-                operator_name: qcSupervisor,  // QC Supervisor stored as operator_name
-                shift_type: getCurrentShiftType(),
-                machine_name: 'FG-Entry',
-                process_name: 'Finished Goods',
-                planned_qty: plannedQuantity || 0,
-                job_start_time: mysqlTimestamp,  // Use properly formatted timestamp
-                job_end_time: mysqlTimestamp,    // Use properly formatted timestamp
-                quantity_processed: fgQuantity,
-                speed_impressions_per_hour: 0,
-                sheets_wasted: 0,
-                remark: fullRemarks  // Packing details stored as remarks
-            };
-            
-            console.log(`   Job data for batch generation:`, JSON.stringify({
-                po_num: jobData.po_num,
-                job_start_time: jobData.job_start_time,
-                job_end_time: jobData.job_end_time
-            }));
-
-            const activities = [{
-                activity_name: 'FG_ENTRY',
-                activity_time_minutes: 0
-            }];
-
-            // insertJobActivities generates batch number using the same series (B000001, B000002, etc.)
-            dbResult = await insertJobActivities(jobData, activities);
-            batchNumber = dbResult.batch_num;
-            console.log(`   ✅ MySQL save successful. Batch: ${batchNumber}`);
-            
-            // Verify batch number format (should be B followed by 6 digits)
-            if (!batchNumber || !batchNumber.match(/^B\d{6}$/)) {
-                console.error(`   ⚠️ Warning: Batch number format unexpected: ${batchNumber}`);
-            }
-        } catch (dbError) {
-            console.error('   ❌ MySQL save failed:', dbError.message);
-            console.error('   Full error:', dbError);
-            
-            // Don't use fallback - return error to user so batch numbers stay consistent
-            return res.status(500).json({
-                error: 'Database error',
-                message: 'Failed to generate batch number. Please try again.',
-                details: dbError.message
-            });
-        }
-
-        // ========== 2. Post to SAP InventoryGenEntries ==========
-        let sapResult = null;
-        if (absoluteEntry) {
-            try {
-                console.log('\n   📤 Posting to SAP InventoryGenEntries (report completion only — no auto-issue)...');
-
-                // Get customer name and code from request body
-                const customerName = req.body.customerName || '';
-
-                // Resolve main product line (not first component line) for report completion
-                let baseLine = null;
-                let poHeaderItem = itemCode;
-                try {
-                    const poLineData = await sapGetRequest(
-                        `/ProductionOrders(${absoluteEntry})?$select=ItemNo,AbsoluteEntry,ProductionOrderLines`
-                    );
-                    const resolved = resolveMainProductCompletionLine(poLineData, itemCode);
-                    baseLine = resolved.baseLine;
-                    poHeaderItem = resolved.headerItem || itemCode;
-                    console.log(`   PO main product line: ItemNo=${resolved.matchedItemNo}, BaseLine=${baseLine ?? 'default'}`);
-                } catch (e) {
-                    console.warn('   ⚠️ Could not fetch ProductionOrderLines for BaseLine:', e?.message || e);
-                }
-
-                // Build SAP comments
-                let sapComments = `FG Entry - QC: ${qcSupervisor} | Packing Detail (Cartons/CFC): ${packingDetails}`;
-                if (pkdDetails) {
-                    sapComments += ` | PKD: ${pkdDetails}`;
-                }
-                if (remarks) {
-                    sapComments += ` | ${remarks}`;
-                }
-
-                sapResult = await postJobCompletionToSAP({
-                    absoluteEntry,
-                    quantity: fgQuantity,
-                    batchNumber,
-                    batchComments: `QC: ${qcSupervisor}${pkdDetails ? ' | PKD: ' + pkdDetails : ''}`,
-                    operatorName: qcSupervisor,
-                    itemCode: poHeaderItem || itemCode,
-                    machineName: 'FG-Entry',
-                    batchMachineLabel: 'FG-Entry',
-                    batchAppLabel: 'FG Data Entry WebApp',
-                    startTime: currentTime,
-                    endTime: currentTime,
-                    packingDetails: String(packingDetails),
-                    remarks: sapComments,
-                    customerName,
-                    baseLine
-                });
-
-                if (sapResult.success) {
-                    console.log(`   ✅ SAP report completion successful! DocEntry: ${sapResult.data?.DocEntry}`);
-                    console.log('   ℹ️ FG is terminal — skipped resource issue and auto-issue to next process');
-                } else {
-                    console.error('   ❌ SAP posting failed:', sapResult.error);
-                    if (sapResult.details) {
-                        console.error('   SAP Error Details:', JSON.stringify(sapResult.details, null, 2));
-                    }
-                }
-            } catch (sapError) {
-                console.error('   ❌ SAP posting failed:', sapError.message);
-                if (sapError.response?.data) {
-                    console.error('   SAP Error Details:', JSON.stringify(sapError.response.data, null, 2));
-                }
-                sapResult = {
-                    success: false,
-                    error: sapError.message,
-                    details: sapError.response?.data || null
-                };
-            }
-        } else {
-            console.log('   ⚠️ No absoluteEntry provided - skipping SAP posting');
-        }
-
-        console.log('\n   📊 FG Entry Summary:');
-        console.log(`      MySQL: ${dbResult ? '✅ Success' : '❌ Failed'}`);
-        console.log(`      SAP: ${sapResult?.success ? '✅ Success' : (absoluteEntry ? '❌ Failed' : '⏭️ Skipped')}`);
-        console.log('==========================================\n');
-
-        // ========== 3. Auto-Print Labels ==========
-        // Calculate number of labels: ceil(fgQuantity / packingDetails)
-        const numLabels = Math.ceil(fgQuantity / packingDetails);
-        
-        // Format date for label (DD/MM/YYYY)
-        const labelNow = new Date();
-        const packedOnDate = `${String(labelNow.getDate()).padStart(2, '0')}/${String(labelNow.getMonth() + 1).padStart(2, '0')}/${labelNow.getFullYear()}`;
-        
-        // Prepare label data
-        const labelData = {
-            customerName: req.body.customerName || '',
-            customerCode: req.body.customerCode || '',
-            itemCodeLabel: (req.body.itemCodeLabel || '') || (await fetchOscnSubstitute(itemCode)),
-            itemDescription: productDescription || '',
-            fgCode: itemCode || '',
-            jobNo: req.body.jobNo || poNumber,
-            quantity: packingDetails,  // Quantity per box
-            packedOn: packedOnDate,
-            operator: formatLabelOperatorField(qcSupervisor, operatorName),
-            batchNo: batchNumber || ''
-        };
-        
-        // Print labels automatically (unless preview-before-print defers to client)
-        let printResult = { success: false, message: 'Printing not attempted', printed: 0 };
-        if (FG_LABEL_PREVIEW_BEFORE_PRINT) {
-            console.log('🖨️ FG label preview mode: skipping auto-print until client confirms');
-            printResult = {
-                success: false,
-                message: 'Awaiting preview confirmation',
-                printed: 0,
-                previewPending: true
-            };
-        } else {
-            try {
-                printResult = await printFGLabels(labelData, numLabels);
-            } catch (printError) {
-                console.error('🖨️ Label printing error:', printError.message);
-                printResult = { success: false, message: printError.message, printed: 0 };
-            }
-        }
-
-        // Return response
-        res.json({
-            success: true,
-            message: 'FG entry submitted successfully',
-            batchNumber: batchNumber,
-            sapDocEntry: sapResult?.data?.DocEntry || null,
-            sapSuccess: sapResult?.success || false,
-            dbSuccess: !!dbResult,
-            printResult: printResult,
-            labelsCount: numLabels,
-            data: {
-                poNumber,
-                fgQuantity,
-                packingDetails,
-                qcSupervisor
-            }
-        });
-
-    } catch (error) {
-        console.error('❌ FG Entry error:', error.message);
-        console.error('   Stack:', error.stack);
-        
-        res.status(500).json({
-            error: 'Failed to submit FG entry',
-            message: error.message
-        });
-    }
-});
-
-/**
- * POST /api/fg-print-labels
- * Trigger Zebra label print after FG preview (when FG_LABEL_PREVIEW_BEFORE_PRINT is enabled).
- * Body: { labelData: { customerName, customerCode, itemDescription, fgCode, jobNo, quantity, packedOn, operator, batchNo }, numLabels: number }
- */
-app.post('/api/fg-print-labels', async (req, res) => {
-    try {
-        const { labelData, numLabels } = req.body || {};
-        const n = Math.ceil(Number(numLabels));
-        if (!labelData || typeof labelData !== 'object' || !Number.isFinite(n) || n < 1) {
-            return res.status(400).json({
-                error: 'Invalid body',
-                message: 'labelData (object) and numLabels (positive integer) are required'
-            });
-        }
-        if (!labelData.itemCodeLabel && labelData.fgCode) {
-            labelData.itemCodeLabel = await fetchOscnSubstitute(labelData.fgCode);
-        }
-        const printResult = await printFGLabels(labelData, n);
-        console.log('🖨️ /api/fg-print-labels result:', printResult);
-        res.json({ success: true, printResult });
-    } catch (error) {
-        console.error('❌ /api/fg-print-labels:', error.message);
-        res.status(500).json({ error: 'Print failed', message: error.message });
-    }
-});
-
-/**
- * POST /api/fg-label-pdf
- * Returns a multi-page PDF (one page per label) for preview/debug or browser printing.
- * Body: { labelData: object, numLabels: number }
- */
-app.post('/api/fg-label-pdf', async (req, res) => {
-    try {
-        const { labelData, numLabels } = req.body || {};
-        const n = Math.ceil(Number(numLabels));
-        if (!labelData || typeof labelData !== 'object' || !Number.isFinite(n) || n < 1) {
-            return res.status(400).json({
-                error: 'Invalid body',
-                message: 'labelData (object) and numLabels (positive integer) are required'
-            });
-        }
-        if (!labelData.itemCodeLabel && labelData.fgCode) {
-            labelData.itemCodeLabel = await fetchOscnSubstitute(labelData.fgCode);
-        }
-        const pdf = await renderLabelsPdfBuffer(labelData, n);
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', 'inline; filename="fg-label.pdf"');
-        res.send(pdf);
-    } catch (error) {
-        console.error('❌ /api/fg-label-pdf:', error.message);
-        res.status(500).json({ error: 'PDF render failed', message: error.message });
-    }
-});
-
-/**
- * POST /api/fg-print-labels-rendered
- * Tablet renders HTML -> PNG, server converts PNG->ZPL (^GFA) and prints to Zebra (no Chromium on server).
- * Body: { labelData: object, numLabels: number, images: [{ boxNum: number, pngDataUrl: string }] }
- */
-app.post('/api/fg-print-labels-rendered', async (req, res) => {
-    try {
-        // Disabled: raster printing degrades barcode quality. Use native ZPL via /api/fg-print-labels instead.
-        return res.status(410).json({
-            error: 'Rendered printing disabled',
-            message: 'Rendered label printing (PNG -> ZPL) is disabled to preserve barcode quality. Use /api/fg-print-labels (native ZPL).'
-        });
-
-        const { labelData, numLabels, images } = req.body || {};
-        const n = Math.ceil(Number(numLabels));
-        if (!labelData || typeof labelData !== 'object' || !Number.isFinite(n) || n < 1) {
-            return res.status(400).json({
-                error: 'Invalid body',
-                message: 'labelData (object) and numLabels (positive integer) are required'
-            });
-        }
-        if (!Array.isArray(images) || images.length !== n) {
-            return res.status(400).json({
-                error: 'Invalid images',
-                message: `images must be an array with exactly ${n} items`
-            });
-        }
-        if (LABEL_PRINTER_CONFIG.printerType !== 'ZPL') {
-            return res.status(400).json({
-                error: 'Unsupported printer type',
-                message: 'Rendered printing is only supported for ZPL printers'
-            });
-        }
-        if (!LABEL_PRINTER_CONFIG.enabled) {
-            return res.status(400).json({
-                error: 'Printing disabled',
-                message: 'LABEL_PRINTER_ENABLED is not true'
-            });
-        }
-
-        let printedCount = 0;
-        const errors = [];
-        for (let i = 0; i < images.length; i++) {
-            const img = images[i] || {};
-            try {
-                const dataUrl = String(img.pngDataUrl || '');
-                const m = dataUrl.match(/^data:image\/png;base64,(.+)$/);
-                if (!m) throw new Error('Invalid pngDataUrl (expected data:image/png;base64,...)');
-                const pngBuffer = Buffer.from(m[1], 'base64');
-                const zpl = generateZPLFromRenderedPngBuffer(pngBuffer);
-                await sendToPrinter(zpl);
-                printedCount++;
-                if (i < images.length - 1) await new Promise(r => setTimeout(r, 300));
-            } catch (e) {
-                errors.push({ label: i + 1, error: e.message });
-                console.error(`   ❌ Rendered label ${i + 1}/${images.length} failed:`, e.message);
-            }
-        }
-
-        const printResult = {
-            success: printedCount > 0,
-            message: `${printedCount}/${n} labels printed (rendered)`,
-            printed: printedCount,
-            total: n,
-            errors: errors.length ? errors : null
-        };
-
-        res.json({ success: true, printResult });
-    } catch (error) {
-        console.error('❌ /api/fg-print-labels-rendered:', error.message);
-        res.status(500).json({ error: 'Print failed', message: error.message });
-    }
-});
-
-/**
- * POST /api/fg-print-label-rendered
- * Print a SINGLE rendered label image (PNG data URL) to Zebra.
- * This avoids "PayloadTooLargeError" by sending one label per request.
- * Body: { pngDataUrl: string }
- */
-app.post('/api/fg-print-label-rendered', async (req, res) => {
-    try {
-        // Disabled: raster printing degrades barcode quality. Use native ZPL via /api/fg-print-labels instead.
-        return res.status(410).json({
-            error: 'Rendered printing disabled',
-            message: 'Rendered label printing (PNG -> ZPL) is disabled to preserve barcode quality. Use /api/fg-print-labels (native ZPL).'
-        });
-
-        if (LABEL_PRINTER_CONFIG.printerType !== 'ZPL') {
-            return res.status(400).json({
-                error: 'Unsupported printer type',
-                message: 'Rendered printing is only supported for ZPL printers'
-            });
-        }
-        if (!LABEL_PRINTER_CONFIG.enabled) {
-            return res.status(400).json({
-                error: 'Printing disabled',
-                message: 'LABEL_PRINTER_ENABLED is not true'
-            });
-        }
-
-        const pngDataUrl = String(req.body?.pngDataUrl || '');
-        const m = pngDataUrl.match(/^data:image\/png;base64,(.+)$/);
-        if (!m) {
-            return res.status(400).json({
-                error: 'Invalid body',
-                message: 'pngDataUrl must be a data:image/png;base64,... string'
-            });
-        }
-
-        const pngBuffer = Buffer.from(m[1], 'base64');
-        const zpl = generateZPLFromRenderedPngBuffer(pngBuffer);
-        await sendToPrinter(zpl);
-        res.json({ success: true });
-    } catch (error) {
-        console.error('❌ /api/fg-print-label-rendered:', error.message);
-        res.status(500).json({ error: 'Print failed', message: error.message });
-    }
-});
-
-/**
- * GET /api/debug/itemcode-label/:itemCode
- * Debug helper to see which Service Layer endpoints/fields are available for BP catalog numbers.
- */
 app.get('/api/debug/itemcode-label/:itemCode', async (req, res) => {
     const itemCode = (req.params.itemCode || '').trim();
     if (!itemCode) return res.status(400).json({ error: 'itemCode required' });
@@ -7482,6 +7984,256 @@ app.get('/api/printer/cups-queues', async (req, res) => {
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ==================== Finished Goods (FG) Entry API ====================
+
+/**
+ * POST /api/fg-entry
+ * Submit Finished Goods entry to SAP and database.
+ * FG is terminal: SAP report completion only — no auto-issue to next process.
+ */
+app.post('/api/fg-entry', async (req, res) => {
+    try {
+        const {
+            poNumber,
+            absoluteEntry,
+            itemCode,
+            productDescription,
+            plannedQuantity,
+            fgQuantity,
+            qcSupervisor,
+            operatorName,
+            remarks,
+            pkdDetails
+        } = req.body;
+
+        console.log('\n📦 ========== FINISHED GOODS ENTRY ==========');
+        console.log(`   PO Number: ${poNumber}`);
+        console.log(`   Absolute Entry: ${absoluteEntry}`);
+        console.log(`   Item Code: ${itemCode}`);
+        console.log(`   FG Quantity: ${fgQuantity}`);
+        console.log(`   QC Supervisor: ${qcSupervisor}`);
+
+        if (!poNumber || !fgQuantity || !qcSupervisor) {
+            return res.status(400).json({
+                error: 'Missing required fields',
+                message: 'poNumber, fgQuantity, and qcSupervisor are required'
+            });
+        }
+
+        const currentTime = new Date().toLocaleTimeString('en-IN', {
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        });
+        const mysqlTimestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
+        let fullRemarks = `FG Qty: ${fgQuantity}`;
+        if (pkdDetails) fullRemarks += ` | PKD: ${pkdDetails}`;
+        if (remarks) fullRemarks += ` | ${remarks}`;
+
+        let dbResult = null;
+        let batchNumber = null;
+        try {
+            const jobData = {
+                po_num: poNumber,
+                fg_num: itemCode,
+                job_name: productDescription,
+                operator_name: qcSupervisor,
+                shift_type: getCurrentShiftType(),
+                machine_name: 'FG-Entry',
+                process_name: 'Finished Goods',
+                planned_qty: plannedQuantity || 0,
+                job_start_time: mysqlTimestamp,
+                job_end_time: mysqlTimestamp,
+                quantity_processed: fgQuantity,
+                speed_impressions_per_hour: 0,
+                sheets_wasted: 0,
+                remark: fullRemarks
+            };
+            dbResult = await insertJobActivities(jobData, [{ activity_name: 'FG_ENTRY', activity_time_minutes: 0 }]);
+            batchNumber = dbResult.batch_num;
+            console.log(`   ✅ Database save successful. Batch: ${batchNumber}`);
+        } catch (dbError) {
+            console.error('   ❌ Database save failed:', dbError.message);
+            return res.status(500).json({
+                error: 'Database error',
+                message: 'Failed to generate batch number. Please try again.',
+                details: dbError.message
+            });
+        }
+
+        let sapResult = null;
+        if (absoluteEntry) {
+            try {
+                const customerName = req.body.customerName || '';
+                let baseLine = null;
+                let poHeaderItem = itemCode;
+                try {
+                    const poLineData = await sapGetRequest(
+                        `/ProductionOrders(${absoluteEntry})?$select=ItemNo,AbsoluteEntry,ProductionOrderLines`
+                    );
+                    const resolved = resolveMainProductCompletionLine(poLineData, itemCode);
+                    baseLine = resolved.baseLine;
+                    poHeaderItem = resolved.headerItem || itemCode;
+                } catch (e) {
+                    console.warn('   ⚠️ Could not fetch ProductionOrderLines for BaseLine:', e?.message || e);
+                }
+
+                let sapComments = `FG Entry - QC: ${qcSupervisor} | Qty: ${fgQuantity}`;
+                if (pkdDetails) sapComments += ` | PKD: ${pkdDetails}`;
+                if (remarks) sapComments += ` | ${remarks}`;
+
+                sapResult = await postJobCompletionToSAP({
+                    absoluteEntry,
+                    quantity: fgQuantity,
+                    batchNumber,
+                    batchComments: `QC: ${qcSupervisor}${pkdDetails ? ' | PKD: ' + pkdDetails : ''}`,
+                    operatorName: qcSupervisor,
+                    itemCode: poHeaderItem || itemCode,
+                    machineName: 'FG-Entry',
+                    batchMachineLabel: 'FG-Entry',
+                    batchAppLabel: 'FG Data Entry WebApp',
+                    startTime: currentTime,
+                    endTime: currentTime,
+                    remarks: sapComments,
+                    customerName,
+                    baseLine
+                });
+            } catch (sapError) {
+                console.error('   ❌ SAP posting failed:', sapError.message);
+                sapResult = {
+                    success: false,
+                    error: sapError.message,
+                    details: sapError.response?.data || null
+                };
+            }
+        }
+
+        const numLabels = 1;
+        const labelNow = new Date();
+        const packedOnDate = `${String(labelNow.getDate()).padStart(2, '0')}/${String(labelNow.getMonth() + 1).padStart(2, '0')}/${labelNow.getFullYear()}`;
+        const inventoryUOM = (req.body.inventoryUOM || '').toString().trim()
+            || (await fetchItemInventoryUOM(itemCode))
+            || 'KGS';
+        const labelData = {
+            customerName: req.body.customerName || '',
+            customerCode: req.body.customerCode || '',
+            itemCodeLabel: (req.body.itemCodeLabel || '') || (await fetchOscnSubstitute(itemCode)),
+            itemDescription: productDescription || '',
+            fgCode: itemCode || '',
+            jobNo: req.body.jobNo || poNumber,
+            quantity: fgQuantity,
+            totalQuantity: fgQuantity,
+            inventoryUOM,
+            packedOn: packedOnDate,
+            operator: formatLabelOperatorField(qcSupervisor, operatorName),
+            batchNo: batchNumber || ''
+        };
+
+        let printResult = { success: false, message: 'Printing not attempted', printed: 0 };
+        if (FG_LABEL_PREVIEW_BEFORE_PRINT) {
+            printResult = { success: false, message: 'Awaiting preview confirmation', printed: 0, previewPending: true };
+        } else {
+            try {
+                printResult = await printFGLabels(labelData, numLabels);
+            } catch (printError) {
+                printResult = { success: false, message: printError.message, printed: 0 };
+            }
+        }
+
+        res.json({
+            success: true,
+            message: 'FG entry submitted successfully',
+            batchNumber,
+            sapDocEntry: sapResult?.data?.DocEntry || null,
+            sapSuccess: sapResult?.success || false,
+            dbSuccess: !!dbResult,
+            printResult,
+            labelsCount: numLabels,
+            labelData,
+            data: { poNumber, fgQuantity, qcSupervisor }
+        });
+    } catch (error) {
+        console.error('❌ FG Entry error:', error.message);
+        res.status(500).json({ error: 'Failed to submit FG entry', message: error.message });
+    }
+});
+
+/**
+ * POST /api/fg-print-labels
+ * Print FG labels (after preview or reprint).
+ */
+app.post('/api/fg-print-labels', async (req, res) => {
+    try {
+        const { labelData, numLabels } = req.body || {};
+        const n = Math.ceil(Number(numLabels));
+        if (!labelData || typeof labelData !== 'object' || !Number.isFinite(n) || n < 1) {
+            return res.status(400).json({
+                error: 'Invalid body',
+                message: 'labelData (object) and numLabels (positive integer) are required'
+            });
+        }
+        if (!labelData.itemCodeLabel && labelData.fgCode) {
+            labelData.itemCodeLabel = await fetchOscnSubstitute(labelData.fgCode);
+        }
+        const printResult = await printFGLabels(labelData, n);
+        res.json({ success: true, printResult });
+    } catch (error) {
+        console.error('❌ /api/fg-print-labels:', error.message);
+        res.status(500).json({ error: 'Print failed', message: error.message });
+    }
+});
+
+/**
+ * GET /api/fg-last-batch/:poNumber
+ * Latest FG batch number saved locally for a PO (for slip reprint).
+ */
+app.get('/api/fg-last-batch/:poNumber', async (req, res) => {
+    try {
+        const poNumber = String(req.params.poNumber || '').trim();
+        if (!poNumber) {
+            return res.status(400).json({ error: 'poNumber is required' });
+        }
+        const batches = await getBatchesByPO(poNumber);
+        const latest = (batches || []).find((b) => b.batch_num) || batches?.[0];
+        res.json({
+            success: true,
+            poNumber,
+            batchNumber: latest?.batch_num || ''
+        });
+    } catch (error) {
+        console.error('❌ /api/fg-last-batch:', error.message);
+        res.status(500).json({ error: 'Failed to load batch', message: error.message });
+    }
+});
+
+/**
+ * POST /api/fg-label-pdf
+ * Multi-page PDF for label preview / browser print.
+ */
+app.post('/api/fg-label-pdf', async (req, res) => {
+    try {
+        const { labelData, numLabels } = req.body || {};
+        const n = Math.ceil(Number(numLabels));
+        if (!labelData || typeof labelData !== 'object' || !Number.isFinite(n) || n < 1) {
+            return res.status(400).json({
+                error: 'Invalid body',
+                message: 'labelData (object) and numLabels (positive integer) are required'
+            });
+        }
+        if (!labelData.itemCodeLabel && labelData.fgCode) {
+            labelData.itemCodeLabel = await fetchOscnSubstitute(labelData.fgCode);
+        }
+        const pdf = await renderLabelsPdfBuffer(labelData, n);
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', 'inline; filename="fg-label.pdf"');
+        res.send(pdf);
+    } catch (error) {
+        console.error('❌ /api/fg-label-pdf:', error.message);
+        res.status(500).json({ error: 'PDF render failed', message: error.message });
     }
 });
 

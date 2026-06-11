@@ -31,46 +31,6 @@
                 <h1 class="machine-title" id="machine-name">Machine Name</h1>
                 <div class="process-container">
                     <span class="process-badge" id="process-name">Process</span>
-                    
-                    <!-- DieCutting Specific Dropdown (Hidden by default) -->
-                    <div id="diecutting-options-container" class="diecutting-select-wrapper" style="display: none;">
-                        <select id="diecutting-process-select" class="process-select">
-                            <option value="DieCutting" selected>DieCutting</option>
-                            <option value="Embossing">Embossing</option>
-                            <option value="Diecutting + Embossing">Diecutting + Embossing</option>
-                            <option value="Diecutting with Striping">Diecutting with Striping</option>
-                            <option value="DieCutting with stripping + Embossing">DieCutting with stripping + Embossing</option>
-                        </select>
-                        <span class="select-arrow">▼</span>
-                    </div>
-                    
-                    <!-- Folding & Pasting Specific Dropdown (Hidden by default) -->
-                    <div id="folding-options-container" class="diecutting-select-wrapper" style="display: none;">
-                        <select id="folding-process-select" class="process-select">
-                            <option value="Side Pasting (RTI)" selected>Side Pasting (RTI)</option>
-                            <option value="Lock Bottom">Lock Bottom</option>
-                            <option value="Double Side Pasting">Double Side Pasting</option>
-                            <option value="Catch Corner">Catch Corner</option>
-                            <option value="Interlock">Interlock</option>
-                            <option value="Four Corner">Four Corner</option>
-                            <option value="Six Corner">Six Corner</option>
-                        </select>
-                        <span class="select-arrow">▼</span>
-                    </div>
-                    
-                    <!-- Foiling Specific Dropdown (Hidden by default) -->
-                    <!-- Foiling machines can also run DIE, EMB, EMB+P jobs -->
-                    <div id="foiling-options-container" class="diecutting-select-wrapper" style="display: none;">
-                        <select id="foiling-process-select" class="process-select">
-                            <option value="Foiling" selected>Foiling</option>
-                            <option value="DieCutting">DieCutting</option>
-                            <option value="Embossing">Embossing</option>
-                            <option value="Diecutting + Embossing">Diecutting + Embossing</option>
-                            <option value="Diecutting with Striping">Diecutting with Striping</option>
-                            <option value="DieCutting with stripping + Embossing">DieCutting with stripping + Embossing</option>
-                        </select>
-                        <span class="select-arrow">▼</span>
-                    </div>
                 </div>
             </div>
         </div>
@@ -130,30 +90,7 @@
                     </div>
                 </div>
 
-                <!-- Section 2: Waiting -->
-                <div class="control-group">
-                    <h3 class="group-title">Waiting</h3>
-                    <div class="control-grid waiting-grid">
-                        <button class="control-btn waiting" id="state-waiting_qc" data-state="waiting_qc">
-                            <span class="btn-icon">📋</span>
-                            <span class="btn-label">QC Approval</span>
-                        </button>
-                        <button class="control-btn waiting" id="state-waiting_die" data-state="waiting_die">
-                            <span class="btn-icon">⚙️</span>
-                            <span class="btn-label">Wait for Die</span>
-                        </button>
-                        <button class="control-btn waiting" id="state-waiting_input" data-state="waiting_input">
-                            <span class="btn-icon">📥</span>
-                            <span class="btn-label">Wait Inputs</span>
-                        </button>
-                        <button class="control-btn waiting" id="state-line_clearance" data-state="line_clearance">
-                            <span class="btn-icon">🧹</span>
-                            <span class="btn-label">Line Clear</span>
-                        </button>
-                    </div>
-                </div>
-
-                <!-- Section 3: Downtime -->
+                <!-- Section 2: Downtime -->
                 <div class="control-group">
                     <h3 class="group-title">Downtime</h3>
                     <div class="control-grid downtime-grid">
@@ -168,24 +105,6 @@
                     </div>
                 </div>
 
-                <!-- Section 4: Running Pause (Job Required) -->
-                <div class="control-group">
-                    <h3 class="group-title">Running Pause <span class="job-required-hint">(Job Required)</span></h3>
-                    <div class="control-grid running-pause-grid">
-                        <button class="control-btn running-pause" id="state-feeder_trip" data-state="feeder_trip" data-requires-job="true">
-                            <span class="btn-icon">⚠️</span>
-                            <span class="btn-label">Feeder Trip</span>
-                        </button>
-                        <button class="control-btn running-pause" id="state-sticky_sheets" data-state="sticky_sheets" data-requires-job="true">
-                            <span class="btn-icon">📄</span>
-                            <span class="btn-label">Sticky Sheets</span>
-                        </button>
-                        <button class="control-btn running-pause" id="state-sorting_waiting" data-state="sorting_waiting" data-requires-job="true" style="display: none;">
-                            <span class="btn-icon">📦</span>
-                            <span class="btn-label">Sorting Waiting</span>
-                        </button>
-                    </div>
-                </div>
             </div>
 
             <div class="action-grid">
@@ -204,7 +123,7 @@
 
         <!-- Right Column: Info Center -->
         <div class="info-panel">
-            <!-- Left Column in Portrait: Timer + Estimates -->
+            <!-- Left Column in Portrait: Timer -->
             <div class="info-left-column">
                 <!-- Timer Display -->
                 <div class="timer-card">
@@ -212,9 +131,6 @@
                     <div class="timer-display" id="timer-display">00:00:00</div>
                     <div class="current-state-badge" id="current-state-label">Not Started</div>
                 </div>
-                
-                <!-- Historical Performance Estimates Card -->
-                <div id="job-estimates-container" class="estimates-card" style="display: none;"></div>
             </div>
 
             <!-- Right Column in Portrait: Job Details -->
@@ -275,77 +191,19 @@
             </div>
             <div class="modal-body">
                 <form id="finish-job-form">
-                    <!-- Jumbled Job Section (Multiple FG items on sheet) -->
-                    <div id="jumbled-job-section" style="display: none;">
-                        <div class="form-group" style="margin-bottom: 15px;">
-                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                                <input type="checkbox" id="isJumbledJob" name="isJumbledJob" onchange="toggleJumbledJobUI()">
-                                <span style="font-weight: 500;">Jumbled Job (Multiple FG items on sheet)</span>
-                            </label>
-                        </div>
-                        <div id="jumbledJobDetails" style="display: none; margin-bottom: 15px; padding: 12px; background: rgba(59, 130, 246, 0.1); border-radius: 8px; border: 1px solid rgba(59, 130, 246, 0.3);">
-                            <h4 style="margin: 0 0 10px; color: var(--text-primary); font-size: 0.95rem;">FG Items on Sheet</h4>
-                            <div id="fgLinesContainer" style="max-height: 200px; overflow-y: auto;">
-                                <!-- Dynamically populated FG lines -->
-                            </div>
-                            <div id="fgLinesEmpty" style="color: var(--text-secondary); font-size: 0.85rem; padding: 10px; text-align: center;">
-                                No FG lines detected. Load a Production Order with multiple FG items.
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- Standard Fields (shown for non-lamination machines) -->
+                    <!-- Standard Fields -->
                     <div id="standard-fields">
                         <div class="form-group">
-                            <label for="sheets-processed">Quantity Processed *</label>
-                            <input type="number" id="sheets-processed" name="sheetsProcessed" min="0" oninput="updateJumbledFGQuantities()">
+                            <label for="sheets-processed">Quantity Processed (KGS) *</label>
+                            <input type="number" id="sheets-processed" name="sheetsProcessed" min="0" step="any">
                         </div>
                         <div class="form-group">
-                            <label for="wasted-sheets">Wasted Sheets *</label>
-                            <input type="number" id="wasted-sheets" name="wastedSheets" min="0">
+                            <label for="wasted-sheets">Wasted Quantity (KGS) *</label>
+                            <input type="number" id="wasted-sheets" name="wastedSheets" min="0" step="any">
                         </div>
                     </div>
                     
-                    <!-- Narendra Lamination Fields -->
-                    <div id="narendra-fields" style="display: none;">
-                        <div class="form-group">
-                            <label for="nar-anilox">Anilox</label>
-                            <input type="text" id="nar-anilox" name="narAnilox" placeholder="Anilox">
-                        </div>
-                        <div class="form-group">
-                            <label for="nar-rubber-mm">Rubber (in mm)</label>
-                            <input type="number" id="nar-rubber-mm" name="narRubberMm" min="0" step="0.01" placeholder="Rubber in mm">
-                        </div>
-                        <div class="form-group">
-                            <label for="nar-tunnel-temp">Tunnel Temperature</label>
-                            <input type="number" id="nar-tunnel-temp" name="narTunnelTemp" min="0" step="0.1" placeholder="Tunnel temp">
-                        </div>
-                        <div class="form-group">
-                            <label for="nar-nip-temp">Nip Temperature</label>
-                            <input type="number" id="nar-nip-temp" name="narNipTemp" min="0" step="0.1" placeholder="Nip temp">
-                        </div>
-                    </div>
-                    
-                    <!-- Folding & Pasting Specific Remarks (hidden by default) -->
-                    <div id="folding-remarks" style="display: none;">
-                        <h4 style="margin: 15px 0 10px; color: var(--text-primary); font-size: 0.95rem;">Folding & Pasting Details</h4>
-                        <div class="form-row" style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-                            <div class="form-group">
-                                <label for="fold-pkd">PKD (Date)</label>
-                                <input type="date" id="fold-pkd" name="foldPKD">
-                            </div>
-                            <div class="form-group">
-                                <label for="fold-num-cartons">Packing Qty *</label>
-                                <input type="number" id="fold-num-cartons" name="foldNumCartons" min="0" placeholder="e.g. 50">
-                            </div>
-                        </div>
-                        <div class="form-group" style="margin-top: 10px;">
-                            <label for="fold-extra-remarks">Additional Remarks</label>
-                            <textarea id="fold-extra-remarks" name="foldExtraRemarks" rows="2" placeholder="Any additional notes..."></textarea>
-                        </div>
-                    </div>
-                    
-                    <!-- Standard Remarks (for non-lamination and non-folding) -->
+                    <!-- Remarks -->
                     <div class="form-group" id="standard-remarks">
                         <label for="finish-remarks">Remarks</label>
                         <textarea id="finish-remarks" name="remarks" rows="3"
@@ -397,11 +255,11 @@
                     <h3 class="summary-section-title">Production Details</h3>
                     <form id="job-summary-form">
                         <div class="form-group" id="summary-sheets-group">
-                            <label for="summary-sheets-processed" id="summary-sheets-label">Quantity Processed *</label>
+                            <label for="summary-sheets-processed" id="summary-sheets-label">Quantity Processed (KGS) *</label>
                             <input type="number" id="summary-sheets-processed" name="sheetsProcessed" required min="0" step="any" disabled>
                         </div>
                         <div class="form-group" id="summary-wasted-group">
-                            <label for="summary-wasted-sheets">Wasted Sheets *</label>
+                            <label for="summary-wasted-sheets">Wasted Quantity (KGS) *</label>
                             <input type="number" id="summary-wasted-sheets" name="wastedSheets" required min="0" disabled>
                         </div>
                         <div class="form-group" id="summary-speed-group">
@@ -415,14 +273,6 @@
                         <div class="form-group" id="summary-packing-group" style="display: none;">
                             <label for="summary-packing-details">Packing Qty *</label>
                             <input type="number" id="summary-packing-details" name="packingDetails" min="0" placeholder="e.g. 50" disabled>
-                        </div>
-                        
-                        <!-- Jumbled Job FG Lines Summary (shown only for jumbled jobs) -->
-                        <div id="summary-jumbled-section" style="display: none; margin: 15px 0; padding: 12px; background: rgba(59, 130, 246, 0.1); border-radius: 8px; border: 1px solid rgba(59, 130, 246, 0.3);">
-                            <h4 style="margin: 0 0 10px; color: var(--text-primary); font-size: 0.95rem;">Jumbled Job - FG Items</h4>
-                            <div id="summary-fg-lines" style="max-height: 150px; overflow-y: auto;">
-                                <!-- Populated dynamically -->
-                            </div>
                         </div>
                         
                         <!-- Auto-Issue Results (shown after job completion) -->
@@ -563,10 +413,6 @@
                             <div class="time-stat-label">Downtime</div>
                             <div class="time-stat-value" id="summary-downtime-time">00:00:00</div>
                         </div>
-                        <div class="time-stat-card">
-                            <div class="time-stat-label">Waiting</div>
-                            <div class="time-stat-value" id="summary-waiting-time">00:00:00</div>
-                        </div>
                         <div class="time-stat-card total">
                             <div class="time-stat-label">Total</div>
                             <div class="time-stat-value" id="summary-total-time">00:00:00</div>
@@ -610,7 +456,6 @@
     </div>
 
     <script src="validation.js"></script>
-    <script src="jumbled-job.js"></script>
     <script src="live-tracking.js"></script>
     <script src="data-entry.js?v=20260311h"></script>
 </body>

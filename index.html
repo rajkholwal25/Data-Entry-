@@ -4,8 +4,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Post Press Data Entry System - Production Dashboard</title>
-    <meta name="description" content="Data entry system for printing and packaging company post-press processes">
+    <title>Unit 1 - Holographic Data Entry System</title>
+    <meta name="description" content="Data entry system for Unit 1 (Holographic) post-press processes">
     <link rel="stylesheet" href="index.css">
 </head>
 
@@ -18,214 +18,12 @@
         <!-- Header Section -->
         <header class="header">
             <div class="company-name">Printing & Packaging</div>
-            <h1 class="main-title">Post Press Dashboard</h1>
-            <p class="subtitle">Select a process and machine to enter production data</p>
-
-            <div class="branch-selector">
-                <label for="branch-select" class="branch-label">Select Branch</label>
-                <div class="branch-select-wrapper">
-                    <select id="branch-select" class="branch-select" aria-label="Select Branch">
-                        <option value="unit-2" selected>Unit 2 - VKGP</option>
-                        <option value="unit-1">Unit 1 - Holographic</option>
-                    </select>
-                    <span class="branch-select-arrow">▼</span>
-                </div>
-            </div>
+            <h1 class="main-title">Unit 1 - Holographic</h1>
+            <p class="subtitle">Select a holographic process and machine to enter production data</p>
         </header>
 
-        <!-- Unit 2 - VKGP Machines -->
-        <div id="unit-2-machines" class="branch-machines" data-branch="unit-2">
-        <div class="process-grid">
-            <!-- Process 1: Die Cutting and Embossing -->
-            <div class="process-card">
-                <div class="process-header">
-                    <div class="process-icon die-cutting">
-                        <span>✂️</span>
-                    </div>
-                    <h2 class="process-title">Die Cutting & Embossing</h2>
-                </div>
-                <div class="machine-list">
-                    <a href="data-entry.html?process=die-cutting-embossing&machine=nova-cut-1" class="machine-item"
-                        id="nova-cut-1">
-                        <span class="machine-name">Nova Cut 1</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                    <a href="data-entry.html?process=die-cutting-embossing&machine=nova-cut-2" class="machine-item"
-                        id="nova-cut-2">
-                        <span class="machine-name">Nova Cut 2</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                    <a href="manual-machine.html?machine=manual-mdc-1" class="machine-item"
-                        id="manual-mdc-1">
-                        <span class="machine-name">Manual (MDC 1)</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                    <a href="manual-machine.html?machine=manual-mdc-2" class="machine-item"
-                        id="manual-mdc-2">
-                        <span class="machine-name">Manual (MDC 2)</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                    <a href="manual-machine.html?machine=manual-mdc-3" class="machine-item"
-                        id="manual-mdc-3">
-                        <span class="machine-name">Manual (MDC 3)</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                    <a href="manual-machine.html?machine=manual-mdc-4" class="machine-item"
-                        id="manual-mdc-4">
-                        <span class="machine-name">Manual (MDC 4)</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                </div>
-            </div>
-
-            <!-- Process 2: Foiling -->
-            <div class="process-card">
-                <div class="process-header">
-                    <div class="process-icon foiling">
-                        <span>✨</span>
-                    </div>
-                    <h2 class="process-title">Foiling</h2>
-                </div>
-                <div class="machine-list">
-                    <a href="data-entry.html?process=foiling&machine=mk-foiling" class="machine-item" id="mk-foiling">
-                        <span class="machine-name">MK Foiling</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                    <a href="manual-machine.html?machine=manual-mf" class="machine-item" id="manual-mf">
-                        <span class="machine-name">Manual (MF)</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                </div>
-            </div>
-
-            <!-- Process 2b: Spot-UV -->
-            <div class="process-card">
-                <div class="process-header">
-                    <div class="process-icon foiling">
-                        <span>💡</span>
-                    </div>
-                    <h2 class="process-title">Spot-UV</h2>
-                </div>
-                <div class="machine-list">
-                    <a href="manual-machine.html?machine=spotuv-sakurai" class="machine-item" id="spotuv-sakurai">
-                        <span class="machine-name">Sakurai</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                    <a href="manual-machine.html?machine=spotuv-horda" class="machine-item" id="spotuv-horda">
-                        <span class="machine-name">Horda</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                    <a href="manual-machine.html?machine=spotuv-apr" class="machine-item" id="spotuv-apr">
-                        <span class="machine-name">APR</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                </div>
-            </div>
-
-            <!-- Process 3: Pasting and Folding -->
-            <div class="process-card">
-                <div class="process-header">
-                    <div class="process-icon pasting">
-                        <span>📦</span>
-                    </div>
-                    <h2 class="process-title">Pasting & Folding</h2>
-                </div>
-                <div class="machine-list">
-                    <a href="data-entry.html?process=pasting-folding&machine=ambition" class="machine-item"
-                        id="ambition">
-                        <span class="machine-name">Ambition</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                    <a href="data-entry.html?process=pasting-folding&machine=visionfold" class="machine-item"
-                        id="visionfold">
-                        <span class="machine-name">VisionFold</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                    <a href="data-entry.html?process=pasting-folding&machine=nova-fold" class="machine-item"
-                        id="nova-fold">
-                        <span class="machine-name">Nova Fold</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                </div>
-            </div>
-
-            <!-- Process 4: Lamination -->
-            <div class="process-card">
-                <div class="process-header">
-                    <div class="process-icon lamination">
-                        <span>📋</span>
-                    </div>
-                    <h2 class="process-title">Lamination</h2>
-                </div>
-                <div class="machine-list">
-                    <a href="manual-machine.html?machine=yilee" class="machine-item" id="yilee">
-                        <span class="machine-name">YILEE</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                    <a href="manual-machine.html?machine=yong-shun" class="machine-item" id="yong-shun">
-                        <span class="machine-name">Yong Shun</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                    <a href="manual-machine.html?machine=narendra" class="machine-item" id="narendra">
-                        <span class="machine-name">Narendra</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                    <a href="manual-machine.html?machine=wity" class="machine-item" id="wity">
-                        <span class="machine-name">Wity</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                </div>
-            </div>
-
-            <!-- Process 4b: RIGID -->
-            <div class="process-card">
-                <div class="process-header">
-                    <div class="process-icon lamination">
-                        <span>🧱</span>
-                    </div>
-                    <h2 class="process-title">RIGID</h2>
-                </div>
-                <div class="machine-list">
-                    <a href="manual-machine.html?machine=rigid-emmeci-1" class="machine-item" id="rigid-emmeci-1">
-                        <span class="machine-name">Emmeci-1</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                    <a href="manual-machine.html?machine=rigid-emmeci-2" class="machine-item" id="rigid-emmeci-2">
-                        <span class="machine-name">Emmeci-2</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                    <a href="manual-machine.html?machine=rigid-fuchu" class="machine-item" id="rigid-fuchu">
-                        <span class="machine-name">Fuchu</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                    <a href="manual-machine.html?machine=rigid-assembly" class="machine-item" id="rigid-assembly">
-                        <span class="machine-name">Assembly</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                </div>
-            </div>
-
-            <!-- Process 5: Finished Goods (FG) -->
-            <div class="process-card">
-                <div class="process-header">
-                    <div class="process-icon finished-goods">
-                        <span>📦</span>
-                    </div>
-                    <h2 class="process-title">Finished Goods (FG)</h2>
-                </div>
-                <div class="machine-list">
-                    <a href="finished-goods.html" class="machine-item" id="finished-goods-entry">
-                        <span class="machine-name">FG Data Entry</span>
-                        <span class="machine-arrow">→</span>
-                    </a>
-                </div>
-            </div>
-
-        </div>
-        </div>
-
         <!-- Unit 1 - Holographic Machines -->
-        <div id="unit-1-machines" class="branch-machines" data-branch="unit-1" hidden>
+        <div id="unit-1-machines" class="branch-machines" data-branch="unit-1">
             <div class="process-grid">
                 <!-- Embossing -->
                 <div class="process-card">
@@ -235,7 +33,7 @@
                         </div>
                         <div>
                             <h2 class="process-title">Embossing</h2>
-                            <p class="process-code">Allowed U_PCode: EMB</p>
+                            <p class="process-code">Allowed U_PCode: EMB, COT (output → OHJW-U1)</p>
                         </div>
                     </div>
                     <div class="machine-list">
@@ -262,7 +60,7 @@
                         </div>
                         <div>
                             <h2 class="process-title">Rewinding</h2>
-                            <p class="process-code">Allowed U_PCode: RWD</p>
+                            <p class="process-code">Allowed U_PCode: REW</p>
                         </div>
                     </div>
                     <div class="machine-list">
@@ -308,12 +106,31 @@
                         </div>
                         <div>
                             <h2 class="process-title">Metallisation</h2>
-                            <p class="process-code">Allowed U_PCode: MLT</p>
+                            <p class="process-code">Allowed U_PCode: MET</p>
                         </div>
                     </div>
                     <div class="machine-list">
                         <a href="data-entry.html?process=metallisation&machine=metallisation-1" class="machine-item" id="metallisation-1">
                             <span class="machine-name">Metallisation-1</span>
+                            <span class="machine-arrow">→</span>
+                        </a>
+                    </div>
+                </div>
+
+                <!-- Finished Goods (FG) -->
+                <div class="process-card">
+                    <div class="process-header">
+                        <div class="process-icon finished-goods">
+                            <span>📦</span>
+                        </div>
+                        <div>
+                            <h2 class="process-title">Finished Goods (FG)</h2>
+                            <p class="process-code">QC approval, report completion &amp; label printing</p>
+                        </div>
+                    </div>
+                    <div class="machine-list">
+                        <a href="finished-goods.html" class="machine-item" id="finished-goods-entry">
+                            <span class="machine-name">FG Data Entry</span>
                             <span class="machine-arrow">→</span>
                         </a>
                     </div>

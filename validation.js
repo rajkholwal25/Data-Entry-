@@ -298,7 +298,7 @@ function validateJobState(job) {
     if (totalActivityTime === 0) {
         result.addError(
             'BIZ_005',
-            'Job has no recorded activity time',
+            'Job has no recorded activity time. Click Make Ready or Running and wait a few seconds before finishing.',
             'activityTime'
         );
     }
@@ -315,22 +315,14 @@ function validateStateChange(data) {
     const result = new ValidationResult();
     const { newState, selectedJob, activeJobNumber, activeJobState } = data;
 
-    // STATE_003: Job selection required for production states and running pause states
-    const jobRequiredStates = ['running', 'makeready', 'feeder_trip', 'sticky_sheets', 'sorting_waiting'];
+    // STATE_003: Job selection required for production states
+    const jobRequiredStates = ['running', 'makeready'];
     if (jobRequiredStates.includes(newState) && !selectedJob) {
-        if (newState === 'feeder_trip' || newState === 'sticky_sheets' || newState === 'sorting_waiting') {
-            result.addError(
-                'STATE_003',
-                'Please select a job first to track Feeder Trip, Sticky Sheets, or Sorting Waiting time',
-                'jobSelection'
-            );
-        } else {
-            result.addError(
-                'STATE_003',
-                'Please select a job first to track Make Ready or Running time',
-                'jobSelection'
-            );
-        }
+        result.addError(
+            'STATE_003',
+            'Please select a job first to track Make Ready or Running time',
+            'jobSelection'
+        );
         return result;
     }
 
@@ -604,13 +596,7 @@ function validateJobSummaryForm(formData, jobData) {
     const makereadySeconds = formData.makereadyTime ? timeStringToSeconds(formData.makereadyTime) : 0;
     const runningSeconds = formData.runningTime ? timeStringToSeconds(formData.runningTime) : 0;
 
-    result.merge(validateTimes({
-        makereadySeconds,
-        runningSeconds,
-        totalSeconds: makereadySeconds + runningSeconds
-    }));
-
-    // Validate complete job data
+    // validateJobCompletion includes validateTimes — do not call validateTimes twice
     result.merge(validateJobCompletion({
         sheetsProcessed: formData.sheetsProcessed,
         wastedSheets: formData.wastedSheets,

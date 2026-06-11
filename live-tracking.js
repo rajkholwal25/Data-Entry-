@@ -1,5 +1,5 @@
 // ============================================================================
-// Live Tracking client (shared by data-entry.js and manual-machine.js)
+// Live Tracking client (used by data-entry.js)
 // ----------------------------------------------------------------------------
 // Sends operator login/logout, job load/unload and machine state changes to the
 // server so a central live dashboard can be built. All calls are best-effort

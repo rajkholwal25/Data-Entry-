@@ -2499,41 +2499,6 @@ body {
     pointer-events: none;
 }
 
-/* Estimates Card - Below Timer */
-.estimates-card {
-    background: linear-gradient(145deg, rgba(17, 24, 39, 0.95) 0%, rgba(10, 15, 26, 0.98) 100%);
-    border-radius: var(--radius-lg);
-    padding: var(--spacing-md);
-    border: 1px solid rgba(16, 185, 129, 0.15);
-    position: relative;
-    overflow: hidden;
-    box-shadow: 
-        0 4px 20px rgba(0, 0, 0, 0.25),
-        inset 0 1px 0 rgba(255, 255, 255, 0.03),
-        0 0 0 1px rgba(16, 185, 129, 0.05);
-}
-
-.estimates-card::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 2px;
-    background: linear-gradient(90deg, transparent, rgba(16, 185, 129, 0.5), rgba(59, 130, 246, 0.5), transparent);
-}
-
-.estimates-card::after {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: radial-gradient(ellipse at 50% 0%, rgba(16, 185, 129, 0.06) 0%, transparent 60%);
-    pointer-events: none;
-}
-
 .timer-display {
     font-size: 4.5rem;
     font-weight: 800;
@@ -2675,7 +2640,7 @@ body {
         align-items: stretch !important;
     }
     
-    /* Left column: Timer + Estimates stacked */
+    /* Left column: Timer */
     .info-left-column {
         display: flex !important;
         flex-direction: column !important;
@@ -2696,13 +2661,6 @@ body {
         justify-content: center !important;
         align-items: center !important;
         flex: 1 !important;
-    }
-    
-    /* Estimates card - compact for portrait */
-    .estimates-card {
-        padding: 10px !important;
-        margin-top: 0 !important;
-        flex: 0 0 auto !important;
     }
 
     .timer-label {

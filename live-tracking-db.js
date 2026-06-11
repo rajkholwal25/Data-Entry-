@@ -70,73 +70,71 @@ function shiftEndTime(shiftType, shiftDateStr) {
 async function ensureTables() {
     await pool.query(`
         CREATE TABLE IF NOT EXISTS machine_shift_sessions (
-            session_id     BIGINT AUTO_INCREMENT PRIMARY KEY,
+            session_id     BIGSERIAL PRIMARY KEY,
             machine_id     VARCHAR(64)  NOT NULL,
-            machine_name   VARCHAR(128) NULL,
-            category       VARCHAR(32)  NULL,
-            process        VARCHAR(64)  NULL,
+            machine_name   VARCHAR(128),
+            category       VARCHAR(32),
+            process        VARCHAR(64),
             operator_name  VARCHAR(128) NOT NULL,
-            shift_type     ENUM('day','night') NOT NULL,
+            shift_type     VARCHAR(8) NOT NULL,
             shift_date     DATE NOT NULL,
-            login_time     DATETIME NOT NULL,
-            logout_time    DATETIME NULL,
-            logout_reason  VARCHAR(32) NULL,
-            device_id      VARCHAR(64) NULL,
-            status         ENUM('active','closed') NOT NULL DEFAULT 'active',
-            created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-            INDEX idx_mss_machine_status (machine_id, status),
-            INDEX idx_mss_shift (shift_date, shift_type),
-            INDEX idx_mss_operator (operator_name)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            login_time     TIMESTAMP NOT NULL,
+            logout_time    TIMESTAMP,
+            logout_reason  VARCHAR(32),
+            device_id      VARCHAR(64),
+            status         VARCHAR(8) NOT NULL DEFAULT 'active',
+            created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
     `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_mss_machine_status ON machine_shift_sessions (machine_id, status)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_mss_shift ON machine_shift_sessions (shift_date, shift_type)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_mss_operator ON machine_shift_sessions (operator_name)`);
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS machine_status (
             machine_id          VARCHAR(64) PRIMARY KEY,
-            machine_name        VARCHAR(128) NULL,
-            category            VARCHAR(32)  NULL,
-            process             VARCHAR(64)  NULL,
-            current_session_id  BIGINT NULL,
-            current_operator    VARCHAR(128) NULL,
-            shift_type          ENUM('day','night') NULL,
-            shift_date          DATE NULL,
-            is_online           TINYINT(1) NOT NULL DEFAULT 0,
-            -- current loaded job
-            current_job_po      VARCHAR(64)  NULL,
-            current_job_name    VARCHAR(255) NULL,
-            current_fg_num      VARCHAR(64)  NULL,
-            job_planned_qty     INT NULL,
-            job_loaded_at       DATETIME NULL,
-            -- current state
-            current_state       VARCHAR(32) NULL,
-            state_started_at    DATETIME NULL,
-            last_event_at       DATETIME NULL,
-            updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            machine_name        VARCHAR(128),
+            category            VARCHAR(32),
+            process             VARCHAR(64),
+            current_session_id  BIGINT,
+            current_operator    VARCHAR(128),
+            shift_type          VARCHAR(8),
+            shift_date          DATE,
+            is_online           SMALLINT NOT NULL DEFAULT 0,
+            current_job_po      VARCHAR(64),
+            current_job_name    VARCHAR(255),
+            current_fg_num      VARCHAR(64),
+            job_planned_qty     INTEGER,
+            job_loaded_at       TIMESTAMP,
+            current_state       VARCHAR(32),
+            state_started_at    TIMESTAMP,
+            last_event_at       TIMESTAMP,
+            updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
     `);
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS machine_state_history (
-            id               BIGINT AUTO_INCREMENT PRIMARY KEY,
+            id               BIGSERIAL PRIMARY KEY,
             machine_id       VARCHAR(64) NOT NULL,
-            machine_name     VARCHAR(128) NULL,
-            session_id       BIGINT NULL,
-            operator_name    VARCHAR(128) NULL,
-            shift_type       ENUM('day','night') NULL,
-            shift_date       DATE NULL,
-            job_po           VARCHAR(64)  NULL,
-            job_name         VARCHAR(255) NULL,
+            machine_name     VARCHAR(128),
+            session_id       BIGINT,
+            operator_name    VARCHAR(128),
+            shift_type       VARCHAR(8),
+            shift_date       DATE,
+            job_po           VARCHAR(64),
+            job_name         VARCHAR(255),
             state            VARCHAR(32) NOT NULL,
-            started_at       DATETIME NOT NULL,
-            ended_at         DATETIME NULL,
-            duration_seconds INT NULL,
-            INDEX idx_msh_machine (machine_id, started_at),
-            INDEX idx_msh_open (machine_id, ended_at),
-            INDEX idx_msh_session (session_id),
-            INDEX idx_msh_shift (shift_date, shift_type)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            started_at       TIMESTAMP NOT NULL,
+            ended_at         TIMESTAMP,
+            duration_seconds INTEGER
+        )
     `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_msh_machine ON machine_state_history (machine_id, started_at)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_msh_open ON machine_state_history (machine_id, ended_at)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_msh_session ON machine_state_history (session_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_msh_shift ON machine_state_history (shift_date, shift_type)`);
 
     console.log('✅ Live tracking tables ready (machine_shift_sessions, machine_status, machine_state_history)');
 }
@@ -153,7 +151,7 @@ async function getStatusRow(machineId) {
 async function closeOpenHistory(machineId, endTime) {
     await pool.query(
         `UPDATE machine_state_history
-            SET ended_at = ?, duration_seconds = TIMESTAMPDIFF(SECOND, started_at, ?)
+            SET ended_at = ?, duration_seconds = EXTRACT(EPOCH FROM (?::timestamp - started_at))::int
           WHERE machine_id = ? AND ended_at IS NULL`,
         [endTime, endTime, machineId]
     );
@@ -161,16 +159,18 @@ async function closeOpenHistory(machineId, endTime) {
 
 // Upsert the machine_status row with a partial set of fields.
 async function upsertStatus(machineId, fields) {
-    const cols = Object.keys(fields);
-    const vals = cols.map(c => fields[c]);
+    // Always refresh updated_at (Postgres has no MySQL-style ON UPDATE clause).
+    const merged = { ...fields, updated_at: nowMySQL() };
+    const cols = Object.keys(merged);
+    const vals = cols.map(c => merged[c]);
 
     const insertCols = ['machine_id', ...cols].join(', ');
     const insertPlaceholders = ['?', ...cols.map(() => '?')].join(', ');
-    const updateClause = cols.map(c => `${c} = VALUES(${c})`).join(', ');
+    const updateClause = cols.map(c => `${c} = EXCLUDED.${c}`).join(', ');
 
     await pool.query(
         `INSERT INTO machine_status (${insertCols}) VALUES (${insertPlaceholders})
-         ON DUPLICATE KEY UPDATE ${updateClause}`,
+         ON CONFLICT (machine_id) DO UPDATE SET ${updateClause}`,
         [machineId, ...vals]
     );
 }
@@ -260,7 +260,8 @@ async function login({ machineId, machineName, category, process, operator, devi
             `INSERT INTO machine_shift_sessions
                 (machine_id, machine_name, category, process, operator_name,
                  shift_type, shift_date, login_time, device_id, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+             RETURNING session_id AS "insertId"`,
             [machineId, machineName || null, category || null, process || null, operator,
                 shift.type, shift.date, ts, deviceId || null]
         );

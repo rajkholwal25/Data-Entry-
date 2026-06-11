@@ -55,8 +55,8 @@ const sampleJobs = [
     }
 ];
 
-// Global state
-let currentJobs = [...sampleJobs];
+// Global state — start empty; jobs come from PO search only
+let currentJobs = [];
 let selectedJob = null;
 let timerInterval = null;
 let timerSeconds = 0;
@@ -251,6 +251,8 @@ function loadStateFromStorage() {
         
         console.log('👤 Operator info restored:', currentOperator || 'not selected');
         console.log('   - operatorSelectedForShift:', operatorSelectedForShift);
+        
+        normalizeShiftClockState();
         
         // Filter jobs: Only keep the active/running job, clear queued jobs
         // Jobs with state 'In Queue' that are not active should be cleared on refresh
@@ -531,6 +533,8 @@ async function refreshSAPDataForJob(job) {
             
             job.issuedQuantity = freshData.issuedQuantity || 0;
             job.completedQuantity = freshData.completedQuantity || 0;
+            job.materialIssuedQuantity = freshData.materialIssuedQuantity ?? freshData.issuedQuantity ?? 0;
+            job.materialPlannedQuantity = freshData.materialPlannedQuantity ?? 0;
             
             console.log(`✅ SAP data refreshed for job ${job.jobNumber}:`);
             console.log(`   - Issued: ${oldIssued} → ${job.issuedQuantity}`);
@@ -540,6 +544,8 @@ async function refreshSAPDataForJob(job) {
             if (selectedJob && selectedJob.jobNumber === job.jobNumber) {
                 selectedJob.issuedQuantity = job.issuedQuantity;
                 selectedJob.completedQuantity = job.completedQuantity;
+                selectedJob.materialIssuedQuantity = job.materialIssuedQuantity;
+                selectedJob.materialPlannedQuantity = job.materialPlannedQuantity;
                 
                 // Refresh the job details display
                 showJobDetails(selectedJob);
@@ -550,6 +556,8 @@ async function refreshSAPDataForJob(job) {
             if (jobIndex !== -1) {
                 currentJobs[jobIndex].issuedQuantity = job.issuedQuantity;
                 currentJobs[jobIndex].completedQuantity = job.completedQuantity;
+                currentJobs[jobIndex].materialIssuedQuantity = job.materialIssuedQuantity;
+                currentJobs[jobIndex].materialPlannedQuantity = job.materialPlannedQuantity;
             }
             
             // Save updated state to localStorage
@@ -573,6 +581,34 @@ function calculateCurrentTimerSeconds() {
     
     const elapsedSinceStart = Math.floor((Date.now() - stateStartTimestamp) / 1000);
     return accumulatedStateTime + elapsedSinceStart;
+}
+
+/** Push live timer into job timeBreakdown before finish validation / submit. */
+function flushCurrentStateTimeToJob() {
+    if (!currentMachineState) return 0;
+    const seconds = calculateCurrentTimerSeconds();
+    timerSeconds = seconds;
+    stateTimers[currentMachineState] = seconds;
+    if (selectedJob) {
+        if (!selectedJob.timeBreakdown) {
+            selectedJob.timeBreakdown = {
+                makeready: 0,
+                running: 0,
+                lunch: 0,
+                cleaning: 0,
+                waiting_qc: 0,
+                waiting_die: 0,
+                waiting_input: 0,
+                line_clearance: 0,
+                downtime_elec: 0,
+                downtime_mech: 0,
+                downtime: 0,
+                idle: 0
+            };
+        }
+        selectedJob.timeBreakdown[currentMachineState] = seconds;
+    }
+    return seconds;
 }
 
 // ==================== IST Time Helper Functions ====================
@@ -632,47 +668,269 @@ let shiftLoginAt = null; // ms timestamp when operator logged in for this shift
 let shiftFooterInterval = null;
 
 // Operator lists by machine
-const OPERATOR_LISTS = {
-    // NovaCut machines (die-cutting-embossing)
-    'nova-cut-1': ['Durgesh', 'Avnish', 'Ranjesh', 'Gopal', 'Amit'],
-    'nova-cut-2': ['Durgesh', 'Avnish', 'Ranjesh', 'Gopal', 'Amit'],
-    
-    // Manual DieCutting machines
-    'manual-mdc-1': ['Ram Milan', 'Arun Kumar', 'Hari Sankar', 'Surender Tiwari', 'Sarvesh', 'Ashok', 'Vicky', 'Rajesh', 'Amit'],
-    'manual-mdc-2': ['Ram Milan', 'Arun Kumar', 'Hari Sankar', 'Surender Tiwari', 'Sarvesh', 'Ashok', 'Vicky', 'Rajesh', 'Amit'],
-    'manual-mdc-3': ['Ram Milan', 'Arun Kumar', 'Hari Sankar', 'Surender Tiwari', 'Sarvesh', 'Ashok', 'Vicky', 'Rajesh', 'Amit'],
-    'manual-mdc-4': ['Ram Milan', 'Arun Kumar', 'Hari Sankar', 'Surender Tiwari', 'Sarvesh', 'Ashok', 'Vicky', 'Rajesh', 'Amit'],
-    
-    // Foiling machines
-    'mk-foiling': ['Sachin', 'Khodas', 'Kunal', 'Arvind', 'Ashok'],
-    'manual-mf': ['Sachin', 'Khodas', 'Kunal', 'Arvind', 'Ashok'],
-    
-    // Folding/Pasting machines
-    'ambition': ['Ravindra', 'Sandeep', 'Goutam', 'Ambuj', 'Sajan', 'Rajnesh', 'Balram', 'Jageswer'],
-    'visionfold': ['Ravindra', 'Sandeep', 'Goutam', 'Ambuj', 'Sajan', 'Rajnesh', 'Balram', 'Jageswer'],
-    'nova-fold': ['Ravindra', 'Sandeep', 'Goutam', 'Ambuj', 'Sajan', 'Rajnesh', 'Balram', 'Jageswer'],
-    
-    // Lamination machines
-    'yilee': ['Sandeep', 'Ganesh', 'Raju', 'Krishna', 'Parimal', 'Pardeep', 'Akash'],
-    'yong-shun': ['Sandeep', 'Ganesh', 'Raju', 'Krishna', 'Parimal', 'Pardeep', 'Akash'],
-    'narendra': ['Sandeep', 'Ganesh', 'Raju', 'Krishna', 'Parimal', 'Pardeep', 'Akash'],
-    'wity': ['Sandeep', 'Ganesh', 'Raju', 'Krishna', 'Parimal', 'Pardeep', 'Akash'],
-
-    // Spot UV machines (Sakurai, Horda, APR)
-    'spotuv-sakurai': ['Ashish Thakur', 'Gourav Pal', 'Sunil', 'Arjun'],
-    'spotuv-horda': ['Ashish Thakur', 'Gourav Pal', 'Sunil', 'Arjun'],
-    'spotuv-apr': ['Ashish Thakur', 'Gourav Pal', 'Sunil', 'Arjun'],
-
-    // Unit 1 - Holographic machines
-    'embossing-1': [],
-    'embossing-2': [],
-    'embossing-3': [],
-    'rewinding-1': [],
-    'rewinding-2': [],
-    'slitting-1': [],
-    'slitting-2': [],
-    'metallisation-1': []
+// Unit 1 operator lists (per process)
+const UNIT1_OPERATORS = {
+    embossing: ['Vipin', 'Vivek', 'Parveen'],
+    rewinding: ['Hariom', 'Shelesh', 'Laxman', 'Kalam'],
+    slitting: ['Hariom', 'Shelesh', 'Laxman', 'Kalam'],
+    metallisation: ['Jagveer', 'Sachin', 'Tejpal']
 };
+
+const OPERATOR_LISTS = {
+    'embossing-1': UNIT1_OPERATORS.embossing,
+    'embossing-2': UNIT1_OPERATORS.embossing,
+    'embossing-3': UNIT1_OPERATORS.embossing,
+    'rewinding-1': UNIT1_OPERATORS.rewinding,
+    'rewinding-2': UNIT1_OPERATORS.rewinding,
+    'slitting-1': UNIT1_OPERATORS.slitting,
+    'slitting-2': UNIT1_OPERATORS.slitting,
+    'metallisation-1': UNIT1_OPERATORS.metallisation
+};
+
+// Unit 1 warehouse codes (FBD-* / OHJW-U1) — from Unit_1 warehouse_mapping.py
+const UNIT1_WAREHOUSES = {
+    FG: 'FBD-FG',
+    RM: 'FBD-RM',
+    EMB: 'FBD-EMB',
+    SLT: 'FBD-SLT',
+    REW: 'FBD-SLT',   // Rewinding uses same warehouse as Slitting
+    MLT: 'FBD-MTL',   // Metallisation
+    COT: 'OHJW-U1'    // All coating FG (HRI / ALO / TRI / TR …) — outsourced
+};
+
+function isUnit1CoatingJob(uPCode, itemCode) {
+    if (String(uPCode || '').toUpperCase().includes('COT')) return true;
+    const ic = String(itemCode || '').toUpperCase();
+    return ic.endsWith('-COT');
+}
+
+function getUnit1OutputWarehouseForJob(uPCode, itemCode) {
+    if (isUnit1CoatingJob(uPCode, itemCode)) return UNIT1_WAREHOUSES.COT;
+    const u = String(uPCode || '').toUpperCase();
+    if (u.includes('EMB')) return UNIT1_WAREHOUSES.EMB;
+    if (u.includes('MET') || u.includes('MTL')) return UNIT1_WAREHOUSES.MLT;
+    if (u.includes('REW') || u.includes('SLT')) return UNIT1_WAREHOUSES.SLT;
+    return UNIT1_WAREHOUSES.RM;
+}
+
+function getUnit1ComponentItemFromJob(job) {
+    for (const arr of [
+        job?.rmcMaterialsNeedIssue,
+        job?.unissuedMaterialsNeedIssue,
+        job?.pmtMaterialsNeedIssue,
+        job?.lamMaterialsNeedIssue
+    ]) {
+        const m = (arr || []).find((x) => x?.itemNo);
+        if (m?.itemNo) return m.itemNo;
+    }
+    return '';
+}
+
+function getUnit1WarehouseForProcess(process) {
+    const p = (process || '').toString().toLowerCase();
+    if (p.includes('embossing')) return UNIT1_WAREHOUSES.EMB;
+    if (p.includes('rewinding')) return UNIT1_WAREHOUSES.REW;
+    if (p.includes('slitting')) return UNIT1_WAREHOUSES.SLT;
+    if (p.includes('metallisation') || p.includes('metallization')) return UNIT1_WAREHOUSES.MLT;
+    if (p.includes('coating')) return UNIT1_WAREHOUSES.COT;
+    if (p.includes('finished') || p === 'fg') return UNIT1_WAREHOUSES.FG;
+    return UNIT1_WAREHOUSES.RM;
+}
+
+function getUnit1WarehouseListForProcess(process) {
+    const primary = getUnit1WarehouseForProcess(process);
+    return Array.from(new Set([primary, UNIT1_WAREHOUSES.RM, UNIT1_WAREHOUSES.FG]));
+}
+
+/** Warehouse search list — from SAP PO BOM material lines (not U_PCode guess). */
+function getUnit1WarehouseListForJob(job) {
+    const fromMaterialLines = [];
+    for (const arr of [
+        job?.rmcMaterialsNeedIssue,
+        job?.unissuedMaterialsNeedIssue,
+        job?.pmtMaterialsNeedIssue,
+        job?.lamMaterialsNeedIssue
+    ]) {
+        for (const m of arr || []) {
+            if (m?.warehouse) fromMaterialLines.push(m.warehouse);
+        }
+    }
+    const primary = fromMaterialLines[0] || getUnit1WarehouseForProcess(machineInfo?.process);
+    return Array.from(new Set([...fromMaterialLines, primary, UNIT1_WAREHOUSES.RM, UNIT1_WAREHOUSES.FG]));
+}
+
+function getUnit1PreviousProcessHint(uPCode) {
+    const u = String(uPCode || '').toUpperCase();
+    if (u.includes('MET') || u.includes('MTL')) {
+        return { process: 'Embossing', warehouse: UNIT1_WAREHOUSES.EMB };
+    }
+    if (u.includes('SLT') || u.includes('REW')) {
+        return { process: 'Coating', warehouse: UNIT1_WAREHOUSES.COT };
+    }
+    if (u.includes('COT')) {
+        return { process: 'Metallisation', warehouse: UNIT1_WAREHOUSES.MTL };
+    }
+    if (u.includes('REW') || u.includes('SLT')) {
+        return { process: 'Metallisation', warehouse: UNIT1_WAREHOUSES.MTL };
+    }
+    return { process: 'Raw material issue', warehouse: UNIT1_WAREHOUSES.RM };
+}
+
+function getUnit1ProcessNameFromUPCode(uPCode, fallbackProcess) {
+    const u = String(uPCode || '').toUpperCase();
+    if (u.includes('COT')) return 'Coating';
+    if (u.includes('MET') || u.includes('MTL')) return 'Metallisation';
+    if (u.includes('REW')) return 'Rewinding';
+    if (u.includes('SLT')) return 'Slitting';
+    if (u.includes('EMB')) return 'Embossing';
+    return fallbackProcess || 'Unknown';
+}
+
+function isUnit1HolographicJob(job) {
+    const u = String(job?.uPCode || '').toUpperCase();
+    return u.includes('EMB') || u.includes('REW') || u.includes('SLT') ||
+        u.includes('MET') || u.includes('MTL') || u.includes('COT');
+}
+
+/**
+ * Unit 1 embossing only: RM issue is film weight; completion includes chemical
+ * coating so done KGS may exceed issued KGS. Other processes keep issued − done cap.
+ */
+function isEmbossingJob(job) {
+    const p = String(machineInfo?.process || job?.process || '').toLowerCase();
+    const n = String(machineInfo?.name || '').toLowerCase();
+    if (p.includes('embossing') || n.includes('embossing')) return true;
+    const u = String(job?.uPCode || '').toUpperCase();
+    if (u === 'EMB+P' || u.startsWith('DIE')) return false;
+    return u.includes('EMB');
+}
+
+function getJobMaterialIssuedQty(job) {
+    if (!job) return 0;
+    return Number(job.materialIssuedQuantity ?? job.issuedQuantity ?? 0) || 0;
+}
+
+/** Issued qty in the same UOM shown on the job card (cartons for DIE/EMB+P, RM KGS for Unit 1). */
+function getJobIssuedQtyForDisplay(job) {
+    if (!job) return 0;
+    if (isUnit1HolographicJob(job)) {
+        return getJobMaterialIssuedQty(job);
+    }
+
+    const uPCode = (job.uPCode || '').toUpperCase();
+    const plannedPositive = (job.plannedQuantity || 0) > 0;
+    let issuedQty = job.issuedQuantity || 0;
+    const needsDivision = plannedPositive &&
+        isDieProcessCodeForBaseQty(uPCode) &&
+        job.baseQuantities && job.baseQuantities.length > 0;
+
+    if (needsDivision && issuedQty > 0) {
+        const totalBaseQty = job.baseQuantities.reduce((sum, bq) => sum + Math.abs(bq), 0);
+        if (totalBaseQty > 0) {
+            issuedQty = Math.round(issuedQty / totalBaseQty * job.baseQuantities.length);
+        }
+    }
+    return issuedQty;
+}
+
+/** Remaining to complete = issued − already done (not planned − done). */
+function computeJobRemainingQty(job) {
+    if (!job) return 0;
+    const issuedQty = getJobIssuedQtyForDisplay(job);
+    const completedQty = job.completedQuantity || 0;
+    return Math.max(0, issuedQty - completedQty);
+}
+
+/** All PO component lines that still need issue before Running. */
+function getPendingMaterialsForRunning(job) {
+    if (!job) return [];
+    const merged = [
+        ...(job.unissuedMaterialsNeedIssue || []),
+        ...(job.rmcMaterialsNeedIssue || []),
+        ...(job.pmtMaterialsNeedIssue || []),
+        ...(job.lamMaterialsNeedIssue || []),
+        ...(job.tapMaterialsNeedIssue || []),
+    ];
+    const seen = new Set();
+    const pending = [];
+    for (const m of merged) {
+        const code = (m?.itemNo || '').toString().trim();
+        if (!code) continue;
+        const key = `${code}|${m.lineNumber ?? ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const rem = m.remainingQuantity ??
+            Math.max(0, (m.plannedQuantity || 0) - (m.issuedQuantity || 0));
+        if (rem > 1e-6) pending.push(m);
+    }
+    pending.sort((a, b) => (Number(a.lineNumber) || 0) - (Number(b.lineNumber) || 0));
+    return pending;
+}
+
+/** Unit 1: skip issue popups only when every BOM component line is fully issued. */
+function canSkipMaterialIssueForRunning(job) {
+    if (!isUnit1HolographicJob(job)) return false;
+    return getPendingMaterialsForRunning(job).length === 0;
+}
+
+/** First process only — raw material issued manually from FBD-RM (batch selection popup). */
+function isUnit1FirstProcessMaterial(material) {
+    const wh = String(material?.warehouse || '').trim().toUpperCase();
+    return wh === String(UNIT1_WAREHOUSES.RM).toUpperCase();
+}
+
+/**
+ * Manual batch popup rules (Unit 1):
+ * - FBD-RM (first process): always show popup
+ * - Later processes, single component: auto-issue FIFO — no popup
+ * - Later processes, 2+ components: auto-issue first line; popup from 2nd line onward
+ */
+function needsManualMaterialIssueDialog(job, material, pendingMaterials, index) {
+    if (!isUnit1HolographicJob(job)) return true;
+    if (isUnit1FirstProcessMaterial(material)) return true;
+    if ((pendingMaterials?.length || 0) > 1 && index > 0) return true;
+    return false;
+}
+
+/** FIFO auto-issue for one BOM line (subsequent processes). */
+async function tryAutoIssueMaterialLine(job, material) {
+    const remaining = material.remainingQuantity ??
+        Math.max(0, (material.plannedQuantity || 0) - (material.issuedQuantity || 0));
+    if (remaining <= 1e-6) {
+        return { success: true, skipped: true, issued: 0 };
+    }
+    try {
+        const { resp, json } = await fetchJsonWithAutoRelease(
+            `${API_CONFIG.BASE_URL}/auto-issue-material`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    absoluteEntry: job.absoluteEntry,
+                    documentNumber: job.jobNumber,
+                    itemCode: material.itemNo,
+                    lineNumber: material.lineNumber,
+                    warehouse: material.warehouse,
+                    quantity: remaining
+                })
+            },
+            { absoluteEntry: job.absoluteEntry, documentNumber: job.jobNumber }
+        );
+        if (!resp.ok || !json?.success) {
+            return {
+                success: false,
+                issued: Number(json?.issued || 0),
+                shortfall: Number(json?.shortfall ?? remaining),
+                message: json?.message || json?.error || 'Auto-issue failed'
+            };
+        }
+        return json;
+    } catch (e) {
+        return { success: false, issued: 0, message: e?.message || String(e) };
+    }
+}
+
+let _jobSubmitInProgress = false;
 
 // Get operator list for current machine
 function getOperatorListForMachine(machineName) {
@@ -911,12 +1169,7 @@ function restoreShiftOperatorFromStorage() {
 function ensureShiftOperatorLoaded() {
     if (currentOperator && shiftLoginAt) return true;
     if (restoreShiftOperatorFromStorage()) return true;
-    if (currentOperator && !shiftLoginAt) {
-        shiftLoginAt = Date.now();
-        saveOperatorToStorage();
-        return true;
-    }
-    return false;
+    return !!(currentOperator && shiftLoginAt);
 }
 
 /** Operator name for DB/API — stays set until clock out. */
@@ -936,26 +1189,12 @@ function persistShiftOperator() {
 // Job loads must NOT re-prompt — operator stays logged in across jobs.
 async function ensureOperatorForShift() {
     restoreShiftOperatorFromStorage();
+    normalizeShiftClockState();
 
     if (!currentOperator) {
         await showOperatorSelectionModal();
-    } else {
-        // Only set login time on first login this shift (never on page re-entry)
-        if (!shiftLoginAt) {
-            const saved = localStorage.getItem(getOperatorStorageKey());
-            let loginAt = null;
-            if (saved) {
-                try {
-                    const data = JSON.parse(saved);
-                    loginAt = data.loginAt || data.savedAt;
-                } catch (e) { /* ignore */ }
-            }
-            shiftLoginAt = loginAt || Date.now();
-            saveOperatorToStorage();
-        }
-        if (typeof LiveTracking !== 'undefined') {
-            LiveTracking.login(currentOperator);
-        }
+    } else if (isShiftClockedIn() && typeof LiveTracking !== 'undefined') {
+        LiveTracking.login(currentOperator);
     }
 
     updateShiftFooterDisplay();
@@ -970,12 +1209,14 @@ function startShiftFooterTimer() {
 }
 
 function updateShiftFooterDisplay() {
+    normalizeShiftClockState();
+
     const opEl = document.getElementById('footer-operator-name');
     const timerEl = document.getElementById('footer-shift-timer');
 
     if (opEl) opEl.textContent = currentOperator || '-';
     if (timerEl) {
-        timerEl.textContent = shiftLoginAt
+        timerEl.textContent = isShiftClockedIn()
             ? formatTime(Math.floor((Date.now() - shiftLoginAt) / 1000))
             : '00:00:00';
     }
@@ -985,12 +1226,38 @@ function isShiftClockedIn() {
     return !!(currentOperator && shiftLoginAt);
 }
 
-function isJobLoadedOnMachine() {
-    if (selectedJob) return true;
-    if (activeJobNumber) return true;
-    if (currentJobs && currentJobs.length > 0) return true;
-    if (currentMachineState === 'running' || currentMachineState === 'makeready') return true;
+/** Drop stale login time when operator is not clocked in (e.g. after clock out or partial restore). */
+function normalizeShiftClockState() {
+    if (!currentOperator && shiftLoginAt) {
+        shiftLoginAt = null;
+    }
+}
+
+function normalizeJobNumber(jobNumber) {
+    return String(jobNumber ?? '').trim();
+}
+
+/** True when operator must finish/cancel before clock out (Running or Make Ready only). */
+function isJobActiveOnMachine() {
+    if (activeJobNumber && (activeJobState === 'running' || activeJobState === 'makeready')) {
+        return true;
+    }
+    if (selectedJob && selectedJob.isActive) {
+        return true;
+    }
+    if (currentMachineState === 'running' || currentMachineState === 'makeready') {
+        return true;
+    }
     return false;
+}
+
+function isJobLoadedOnMachine() {
+    return isJobActiveOnMachine();
+}
+
+function removeJobFromQueue(jobNumber) {
+    const key = normalizeJobNumber(jobNumber);
+    currentJobs = currentJobs.filter((job) => normalizeJobNumber(job.jobNumber) !== key);
 }
 
 function getShiftSessionStorageKey() {
@@ -1063,7 +1330,9 @@ function updateClockButtonUI() {
         btn.textContent = 'Clock out';
         btn.classList.remove('clock-in');
         btn.classList.add('clock-out');
-        btn.title = 'Finish current job first, then clock out to see shift summary';
+        btn.title = isJobActiveOnMachine()
+            ? 'Finish or cancel the current job before clocking out'
+            : 'Clock out to see shift summary';
     } else {
         btn.textContent = 'Clock in';
         btn.classList.remove('clock-out');
@@ -1879,15 +2148,21 @@ document.addEventListener('DOMContentLoaded', function () {
 
         // Try to restore state from localStorage
         const stateRestored = loadStateFromStorage();
+        if (!stateRestored) {
+            currentJobs = [];
+        }
 
         // Restore clock-in session (operator + timer + session summary data)
         if (machine) {
             restoreShiftOperatorFromStorage();
+            normalizeShiftClockState();
             loadShiftSessionFromStorage();
             updateShiftFooterDisplay();
+            updateClockButtonUI();
         }
         
         updateMachineInfo(process, machine);
+        document.querySelector('.estimates-card')?.remove();
         renderJobQueue(currentJobs);
         setupEventListeners();
         
@@ -2035,145 +2310,18 @@ function setupBeforeUnloadHandler() {
 // Update machine information
 function updateMachineInfo(process, machine) {
     try {
-    const machineNameEl = document.getElementById('machine-name');
-    const processNameEl = document.getElementById('process-name');
-    const diecuttingContainer = document.getElementById('diecutting-options-container');
-    const diecuttingSelect = document.getElementById('diecutting-process-select');
-    const foldingContainer = document.getElementById('folding-options-container');
-    const foldingSelect = document.getElementById('folding-process-select');
-    const foilingContainer = document.getElementById('foiling-options-container');
-    const foilingSelect = document.getElementById('foiling-process-select');
+        const machineNameEl = document.getElementById('machine-name');
+        const processNameEl = document.getElementById('process-name');
 
-    if (machine && process) {
-        machineNameEl.textContent = formatMachineName(machine);
-        processNameEl.textContent = formatProcessName(process);
-
-        // Reset all dropdowns first
-        if (diecuttingContainer) diecuttingContainer.style.display = 'none';
-        if (foldingContainer) foldingContainer.style.display = 'none';
-        if (foilingContainer) foilingContainer.style.display = 'none';
-        processNameEl.style.display = 'inline-block';
-
-        // CHECK IF PROCESS IS DIECUTTING (Case insensitive)
-        // Checks for 'diecutting', 'die-cutting', or 'die cutting'
-        if (process.toLowerCase().includes('diecutting') ||
-            process.toLowerCase().includes('die-cutting') ||
-            process.toLowerCase().includes('die cutting')) {
-
-            // SHOW DieCutting Dropdown
-            diecuttingContainer.style.display = 'flex';
-
-            // HIDE Static Badge (User request: dropdown replaces badge for this process)
-            processNameEl.style.display = 'none';
-
-            // Allow user to select sub-process
-            diecuttingSelect.onchange = function () {
-                // Update the tracked process info when selection changes
-                machineInfo.subProcess = this.value;
-                console.log('Sub-process selected:', machineInfo.subProcess);
-                // Save state when sub-process changes
-                saveStateToStorage();
-            };
-
-            // Restore saved sub-process or use default
-            if (machineInfo.subProcess && Array.from(diecuttingSelect.options).some(opt => opt.value === machineInfo.subProcess)) {
-                diecuttingSelect.value = machineInfo.subProcess;
-                console.log('📋 Restored DieCutting sub-process:', machineInfo.subProcess);
-            } else {
-            machineInfo.subProcess = diecuttingSelect.value;
-            }
-        } 
-        // Show dropdown for folding-pasting process
-        else if (process.toLowerCase().includes('pasting') ||
-                 process.toLowerCase().includes('folding') ||
-                 process.toLowerCase().includes('fold')) {
-
-            // SHOW Folding/Pasting Dropdown
-            foldingContainer.style.display = 'flex';
-
-            // HIDE Static Badge
-            processNameEl.style.display = 'none';
-
-            // Allow user to select sub-process
-            foldingSelect.onchange = function () {
-                machineInfo.subProcess = this.value;
-                console.log('Sub-process selected:', machineInfo.subProcess);
-                // Save state when sub-process changes
-                saveStateToStorage();
-            };
-
-            // Restore saved sub-process or use default
-            if (machineInfo.subProcess && Array.from(foldingSelect.options).some(opt => opt.value === machineInfo.subProcess)) {
-                foldingSelect.value = machineInfo.subProcess;
-                console.log('📋 Restored Folding sub-process:', machineInfo.subProcess);
-            } else {
-            machineInfo.subProcess = foldingSelect.value;
-            }
-        }
-        // For Lamination - default process name is "Lamination"
-        else if (process.toLowerCase().includes('lamination')) {
-            machineInfo.subProcess = 'Lamination';
-        }
-        // Unit 1 - Holographic processes
-        else if (
-            process.toLowerCase().includes('embossing') ||
-            process.toLowerCase().includes('rewinding') ||
-            process.toLowerCase().includes('slitting') ||
-            process.toLowerCase().includes('metallisation') ||
-            process.toLowerCase().includes('metallization')
-        ) {
+        if (machine && process) {
+            machineNameEl.textContent = formatMachineName(machine);
+            processNameEl.textContent = formatProcessName(process);
+            processNameEl.style.display = 'inline-block';
             machineInfo.subProcess = formatProcessName(process);
-        }
-        // For Foiling - show dropdown with Foiling + DieCutting options
-        else if (process.toLowerCase().includes('foiling')) {
-            // SHOW Foiling Dropdown
-            foilingContainer.style.display = 'flex';
-
-            // HIDE Static Badge
-            processNameEl.style.display = 'none';
-
-            // Allow user to select sub-process
-            foilingSelect.onchange = function () {
-                machineInfo.subProcess = this.value;
-                console.log('Sub-process selected:', machineInfo.subProcess);
-                // Save state when sub-process changes
-                saveStateToStorage();
-            };
-
-            // Restore saved sub-process or use default
-            if (machineInfo.subProcess && Array.from(foilingSelect.options).some(opt => opt.value === machineInfo.subProcess)) {
-                foilingSelect.value = machineInfo.subProcess;
-                console.log('📋 Restored Foiling sub-process:', machineInfo.subProcess);
-            } else {
-                machineInfo.subProcess = foilingSelect.value;
-            }
-        }
-        else {
-            machineInfo.subProcess = null;
-        }
-
-        // Toggle Running Pause buttons based on machine type
-        const stickyBtn = document.getElementById('state-sticky_sheets');
-        const sortingBtn = document.getElementById('state-sorting_waiting');
-
-        if (process.toLowerCase().includes('pasting') ||
-            process.toLowerCase().includes('folding') ||
-            process.toLowerCase().includes('fold')) {
-            // For Pasting/Folding machines: hide Sticky Sheets, show Sorting Waiting
-            if (stickyBtn) stickyBtn.style.display = 'none';
-            if (sortingBtn) sortingBtn.style.display = 'flex';
         } else {
-            // For other machines: show Sticky Sheets, hide Sorting Waiting
-            if (stickyBtn) stickyBtn.style.display = 'flex';
-            if (sortingBtn) sortingBtn.style.display = 'none';
+            machineNameEl.textContent = 'Machine Dashboard';
+            processNameEl.textContent = 'Production';
         }
-    } else {
-        machineNameEl.textContent = 'Machine Dashboard';
-        processNameEl.textContent = 'Production';
-        if (diecuttingContainer) diecuttingContainer.style.display = 'none';
-        if (foldingContainer) foldingContainer.style.display = 'none';
-        if (foilingContainer) foilingContainer.style.display = 'none';
-    }
     } catch (error) {
         console.error('Error in updateMachineInfo:', error);
     }
@@ -2216,32 +2364,6 @@ function createJobCard(job, index) {
     card.dataset.jobNumber = job.jobNumber;
 
     const statusClass = getStatusClass(job.state);
-    
-    // Build estimates HTML if available
-    let estimatesHtml = '';
-    if (job.estimates && job.estimates.bestMakeReadyMinutes !== null) {
-        const bestMakeReadyMins = Math.round(job.estimates.bestMakeReadyMinutes);
-        const estRunningMins = job.estimates.estimatedRunningMinutes 
-            ? Math.round(job.estimates.estimatedRunningMinutes) 
-            : '--';
-        const totalEstimateMins = Math.round(job.estimates.bestMakeReadyMinutes + (job.estimates.estimatedRunningMinutes || 0));
-        
-        // Machine names for best records
-        const bestMRMachine = job.estimates.bestMakeReadyMachine || 'N/A';
-        const bestRunMachine = job.estimates.bestRunningMachine || 'N/A';
-        
-        estimatesHtml = `
-            <div class="job-estimates" style="background: linear-gradient(135deg, #f0fdf4 0%, #ecfeff 100%); border: 1px solid #86efac; border-radius: 6px; padding: 8px; margin-top: 8px; font-size: 11px;">
-                <div style="color: #166534; font-weight: 600; margin-bottom: 4px;">📊 Est. (${job.estimates.jobCount} jobs)</div>
-                <div style="display: flex; gap: 8px; color: #475569;">
-                    <span>MR: <strong style="color: #059669;">${bestMakeReadyMins} min</strong></span>
-                    <span>Run: <strong style="color: #2563eb;">${estRunningMins} min</strong></span>
-                    <span>Total: <strong>${totalEstimateMins} min</strong></span>
-                </div>
-                <div style="font-size: 10px; color: #94a3b8; margin-top: 2px;">Best on: ${bestMRMachine}</div>
-            </div>
-        `;
-    }
 
     card.innerHTML = `
         <div class="job-card-header">
@@ -2259,7 +2381,6 @@ function createJobCard(job, index) {
                 <span class="job-detail-value">${job.numOfUps}</span>
             </div>
         </div>
-        ${estimatesHtml}
     `;
 
     card.addEventListener('click', () => selectJob(job));
@@ -2377,47 +2498,30 @@ function showJobDetails(job) {
         jobItemNoEl.textContent = job.itemNo || '-';
     }
 
-    // Check if this job requires base quantity division (U_PCode starts with DIE, or EMB+P)
-    // For these jobs, issued quantity is in SHEETS but we display in CARTONS (only when planned qty > 0)
-    const uPCode = (job.uPCode || '').toUpperCase();
-    const plannedPositive = (job.plannedQuantity || 0) > 0;
-    const needsDivision = plannedPositive &&
-                          isDieProcessCodeForBaseQty(uPCode) &&
-                          job.baseQuantities && job.baseQuantities.length > 0;
-    
-    // Get raw issued quantity from SAP (in sheets for DIE/EMB+P)
-    let issuedQty = job.issuedQuantity || 0;
-    let completedQty = job.completedQuantity || 0;
-    
+    const unit1Job = isUnit1HolographicJob(job);
+    const issuedQty = getJobIssuedQtyForDisplay(job);
+    const completedQty = job.completedQuantity || 0;
+
     console.log(`📊 showJobDetails - Raw values from job object:`);
     console.log(`   job.issuedQuantity: ${job.issuedQuantity}`);
+    console.log(`   job.materialIssuedQuantity: ${job.materialIssuedQuantity}`);
     console.log(`   job.completedQuantity: ${job.completedQuantity}`);
-    
-    // For DIE/EMB+P jobs, convert sheets to cartons for display
-    // Note: completedQuantity from SAP is already in cartons (SAP stores completion in cartons)
-    // But issuedQuantity is in sheets, so we need to convert it
-    if (needsDivision && issuedQty > 0) {
-        // Calculate total base quantity divisor (sum of absolute base quantities)
-        const totalBaseQty = job.baseQuantities.reduce((sum, bq) => sum + Math.abs(bq), 0);
-        if (totalBaseQty > 0) {
-            // Convert issued sheets to cartons
-            issuedQty = Math.round(issuedQty / totalBaseQty * job.baseQuantities.length);
-            console.log(`📊 Display conversion (U_PCode: ${uPCode}): Issued ${job.issuedQuantity} sheets → ${issuedQty} cartons`);
-        }
-    }
+    console.log(`   display issued: ${issuedQty}, remaining: ${computeJobRemainingQty(job)}`);
     
     // Display issued quantity (now in cartons for DIE/EMB+P)
     const jobIssuedEl = document.getElementById('selected-job-issued');
     if (jobIssuedEl) {
-        jobIssuedEl.textContent = issuedQty > 0 ? issuedQty.toLocaleString() : '-';
+        jobIssuedEl.textContent = (unit1Job || issuedQty > 0)
+            ? issuedQty.toLocaleString()
+            : '-';
     }
 
-    // Display completed quantity and remaining quantity
-    const remainingQty = issuedQty > 0 ? (issuedQty - completedQty) : 0;
+    // Remaining = issued − already done
+    const remainingQty = computeJobRemainingQty(job);
     
     const jobCompletedEl = document.getElementById('selected-job-completed');
     if (jobCompletedEl) {
-        if (issuedQty > 0) {
+        if (unit1Job || issuedQty > 0) {
             jobCompletedEl.textContent = completedQty.toLocaleString();
         } else {
             jobCompletedEl.textContent = '-';
@@ -2426,10 +2530,17 @@ function showJobDetails(job) {
     
     const jobRemainingEl = document.getElementById('selected-job-remaining');
     if (jobRemainingEl) {
-        if (issuedQty > 0) {
-            jobRemainingEl.textContent = remainingQty.toLocaleString();
+        if (unit1Job || issuedQty > 0 || completedQty > 0) {
+            if (isEmbossingJob(job) && completedQty > issuedQty) {
+                jobRemainingEl.textContent = '—';
+                jobRemainingEl.title = 'Embossing: done can exceed RM issue (chemical weight not issued separately)';
+            } else {
+                jobRemainingEl.textContent = remainingQty.toLocaleString();
+                jobRemainingEl.title = '';
+            }
         } else {
             jobRemainingEl.textContent = '-';
+            jobRemainingEl.title = '';
         }
     }
 
@@ -2440,110 +2551,6 @@ function showJobDetails(job) {
         statusBadge.className = `status-badge ${getStatusClass(displayState)}`;
     }
     
-    // Display historical performance estimates
-    const estimatesContainer = document.getElementById('job-estimates-container');
-    if (estimatesContainer) {
-        if (job.estimates && job.estimates.bestMakeReadyMinutes !== null) {
-            const bestMakeReadyMins = Math.round(job.estimates.bestMakeReadyMinutes);
-            const estRunningMins = job.estimates.estimatedRunningMinutes 
-                ? Math.round(job.estimates.estimatedRunningMinutes) 
-                : '--';
-            const totalEstimateMins = Math.round(job.estimates.bestMakeReadyMinutes + (job.estimates.estimatedRunningMinutes || 0));
-            
-            // Machine names for best records
-            const bestMRMachine = job.estimates.bestMakeReadyMachine || 'N/A';
-            const bestRunMachine = job.estimates.bestRunningMachine || 'N/A';
-            
-            // Calculate estimated completion time
-            const totalEstimateMs = (job.estimates.bestMakeReadyMinutes + (job.estimates.estimatedRunningMinutes || 0)) * 60 * 1000;
-            let estCompletionTime = '';
-            if (job.jobStartTime) {
-                const startTime = new Date(job.jobStartTime);
-                const estCompletionDateTime = new Date(startTime.getTime() + totalEstimateMs);
-                estCompletionTime = estCompletionDateTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
-            } else {
-                // If job hasn't started, calculate from current time
-                const now = new Date();
-                const estCompletionDateTime = new Date(now.getTime() + totalEstimateMs);
-                estCompletionTime = estCompletionDateTime.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
-            }
-            
-            // Check if portrait mode
-            const isPortrait = window.matchMedia("(orientation: portrait)").matches;
-            
-            if (isPortrait) {
-                // Compact horizontal layout for portrait mode
-                estimatesContainer.innerHTML = `
-                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-                        <div style="display: flex; align-items: center; gap: 6px;">
-                            <span style="font-size: 9px; color: #6b7280; text-transform: uppercase;">📊</span>
-                            <div style="display: flex; gap: 10px;">
-                                <div>
-                                    <span style="font-size: 9px; color: #6b7280;">MR:</span>
-                                    <span style="font-size: 13px; font-weight: 700; color: #10b981; margin-left: 2px;">${bestMakeReadyMins}m</span>
-                                </div>
-                                <div>
-                                    <span style="font-size: 9px; color: #6b7280;">Run:</span>
-                                    <span style="font-size: 13px; font-weight: 700; color: #3b82f6; margin-left: 2px;">${estRunningMins}m</span>
-                                </div>
-                                <div>
-                                    <span style="font-size: 9px; color: #6b7280;">Total:</span>
-                                    <span style="font-size: 13px; font-weight: 700; color: #a78bfa; margin-left: 2px;">${totalEstimateMins}m</span>
-                                </div>
-                            </div>
-                        </div>
-                        <div style="text-align: right; border-left: 1px solid rgba(255,255,255,0.1); padding-left: 10px;">
-                            <div style="font-size: 9px; color: #6b7280;">🕐 Done by</div>
-                            <div style="font-size: 14px; font-weight: 700; color: #fbbf24;">${estCompletionTime}</div>
-                        </div>
-                    </div>
-                `;
-            } else {
-                // Full detailed layout for landscape mode
-                estimatesContainer.innerHTML = `
-                    <div style="text-align: center; margin-bottom: 10px;">
-                        <span style="font-size: 10px; color: #10b981; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px;">
-                            📊 Historical Best Performance
-                        </span>
-                        <span style="font-size: 9px; color: #6b7280; margin-left: 6px;">(${job.estimates.jobCount} jobs)</span>
-                    </div>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;">
-                        <div style="text-align: center; padding: 10px 8px; background: linear-gradient(135deg, rgba(16, 185, 129, 0.15) 0%, rgba(16, 185, 129, 0.05) 100%); border-radius: 10px; border: 1px solid rgba(16, 185, 129, 0.2);">
-                            <div style="font-size: 9px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">MakeReady</div>
-                            <div style="font-size: 22px; font-weight: 800; color: #10b981; line-height: 1;">${bestMakeReadyMins}</div>
-                            <div style="font-size: 10px; color: #10b981; opacity: 0.8;">minutes</div>
-                            <div style="font-size: 9px; color: #4b5563; margin-top: 4px; padding-top: 4px; border-top: 1px solid rgba(16, 185, 129, 0.15);">Best: ${bestMRMachine}</div>
-                        </div>
-                        <div style="text-align: center; padding: 10px 8px; background: linear-gradient(135deg, rgba(59, 130, 246, 0.15) 0%, rgba(59, 130, 246, 0.05) 100%); border-radius: 10px; border: 1px solid rgba(59, 130, 246, 0.2);">
-                            <div style="font-size: 9px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px;">Running</div>
-                            <div style="font-size: 22px; font-weight: 800; color: #3b82f6; line-height: 1;">${estRunningMins}</div>
-                            <div style="font-size: 10px; color: #3b82f6; opacity: 0.8;">minutes</div>
-                            <div style="font-size: 9px; color: #4b5563; margin-top: 4px; padding-top: 4px; border-top: 1px solid rgba(59, 130, 246, 0.15);">Best: ${bestRunMachine}</div>
-                        </div>
-                    </div>
-                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; background: rgba(0,0,0,0.2); border-radius: 8px;">
-                        <div>
-                            <div style="font-size: 9px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px;">Total Estimate</div>
-                            <div style="font-size: 20px; font-weight: 800; color: #a78bfa;">${totalEstimateMins} <span style="font-size: 12px; font-weight: 400;">min</span></div>
-                        </div>
-                        <div style="text-align: right;">
-                            <div style="font-size: 9px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.5px;">🕐 Est. Completion</div>
-                            <div style="font-size: 18px; font-weight: 700; color: #fbbf24;">${estCompletionTime}</div>
-                        </div>
-                    </div>
-                `;
-            }
-            estimatesContainer.style.display = 'block';
-        } else {
-            estimatesContainer.innerHTML = `
-                <div style="text-align: center; padding: 12px;">
-                    <span style="font-size: 10px; color: #6b7280;">📊 No historical data available</span>
-                </div>
-            `;
-            estimatesContainer.style.display = 'block';
-        }
-    }
-
     // Don't reset timers - they should persist across jobs until shift change
     // if (!job.isActive) {
     //     resetAllStateTimers();
@@ -3195,8 +3202,8 @@ async function showPMTMaterialIssueDialog(pmtMaterials, absoluteEntry, jobPlanne
     });
 }
 
-// Non-batch material issue dialog — REMOVED (non-batch items are skipped)
-async function __REMOVED_showNonBatchMaterialIssueDialog(material, absoluteEntry, jobPlannedQty, documentNumber) {
+// Non-batch material issue dialog (glue, chemicals, etc.)
+async function showNonBatchMaterialIssueDialog(material, absoluteEntry, jobPlannedQty, documentNumber, materialIndex = 1, totalMaterials = 1) {
     return new Promise(async (resolve) => {
         try {
             const overlay = document.createElement('div');
@@ -3249,28 +3256,13 @@ async function __REMOVED_showNonBatchMaterialIssueDialog(material, absoluteEntry
             }
 
             function getHolographicWarehouseList() {
-                const p = (machineInfo?.process || '').toString().toLowerCase();
-                if (p.includes('embossing')) return ['II-EMB'];
-                if (p.includes('rewinding')) return ['II-RWD'];
-                if (p.includes('slitting')) return ['II-SLT'];
-                if (p.includes('metallisation') || p.includes('metallization')) return ['II-MLT'];
-                return ['II-EMB', 'II-RWD', 'II-SLT', 'II-MLT'];
+                return getUnit1WarehouseListForJob(selectedJob);
             }
 
             function getSmartWarehouseSearchList() {
-                // NOTE: Order matters — we’ll search in priority order for this machine type.
-                if (isSpotUVMachine()) return ['II-SPUV', 'II-PST'];
-                if (isDieCuttingMachine() || (isFoilingMachine && isFoilingMachine() && isDieCuttingSubProcess && isDieCuttingSubProcess())) return ['II-DIE', 'II-EMB'];
-                if (isLaminationMachine()) return ['II-LAM', 'II-MPET'];
-                if (isFoldingPastingMachine()) return ['II-PST'];
-                if (isHolographicMachineContext()) return getHolographicWarehouseList();
-                if (isRigidMachineContext()) return ['II-MKG', 'II-ASS'];
-                // Fallbacks: try material's suggested warehouse first, then common stores
                 const hinted = (material && material.warehouse) ? String(material.warehouse) : '';
-                const base = [hinted, 'II-PST', 'II-LAM', 'II-FOI', 'II-DIE', 'II-EMB', 'II-MPET', 'II-MKG', 'II-ASS', 'II-SPUV']
-                    .filter(Boolean);
-                // unique
-                return Array.from(new Set(base));
+                const unit1 = getHolographicWarehouseList();
+                return Array.from(new Set([hinted, ...unit1].filter(Boolean)));
             }
 
             const warehouseCandidates = getSmartWarehouseSearchList();
@@ -3283,7 +3275,7 @@ async function __REMOVED_showNonBatchMaterialIssueDialog(material, absoluteEntry
 
             modal.innerHTML = `
                 <div style="background: linear-gradient(135deg, #0f766e 0%, #0b4f48 100%); padding: 16px 20px; color: white;">
-                    <div style="font-size: 18px; font-weight: 800;">Material Issue</div>
+                    <div style="font-size: 18px; font-weight: 800;">Material Issue ${totalMaterials > 1 ? `(${materialIndex}/${totalMaterials})` : ''}</div>
                     <div style="font-size: 12px; opacity: 0.9; margin-top: 4px;">Non-batch item requires issue before Running</div>
                 </div>
                 <div style="padding: 18px 20px; overflow: auto;">
@@ -3416,6 +3408,8 @@ async function __REMOVED_showNonBatchMaterialIssueDialog(material, absoluteEntry
                             warehouse: chosenWarehouse || undefined,
                             lineNumber: material?.lineNumber,
                             remarks: 'Material issued via Data Entry WebApp (non-batch)',
+                            operatorName: currentOperator || undefined,
+                            machineName: machineInfo?.name || undefined
                         })
                     });
                     const json = await resp.json().catch(() => ({}));
@@ -3439,6 +3433,65 @@ async function __REMOVED_showNonBatchMaterialIssueDialog(material, absoluteEntry
 }
 
 // ==================== RMC Material Issue Dialog (Batch-Based) ====================
+
+/** Format SAP batch number for display (raw value kept for issue API). */
+function formatBatchForDisplay(batchNumber) {
+    const raw = String(batchNumber || '').trim();
+    if (!raw) return { html: '', text: '' };
+
+    const esc = (s) => String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+
+    // Unit 1 batch: PBP-12-1003-ALO-EMB-001
+    const unit1Match = raw.match(/^(.+)-(EMB|MET|MTL|SLT|REW|COT)-(\d{3})$/i);
+    if (unit1Match) {
+        const base = unit1Match[1];
+        const proc = unit1Match[2].toUpperCase();
+        const seq = unit1Match[3];
+        return {
+            html: `<span style="font-weight:600;">${esc(base)}-${esc(proc)}-</span><span style="color:#7c3aed;font-weight:800;font-size:15px;">${esc(seq)}</span>`,
+            text: `${base}-${proc}-${seq}`
+        };
+    }
+
+    // Standard app batches: B000001
+    if (/^B\d{6}$/i.test(raw)) {
+        const main = raw.toUpperCase();
+        return { html: esc(main), text: main };
+    }
+
+    // Test / legacy batches: TEST-{epochMs}
+    const testMatch = raw.match(/^TEST-(\d{10,13})$/i);
+    if (testMatch) {
+        const ts = Number(testMatch[1]);
+        if (Number.isFinite(ts) && ts > 1e11) {
+            const when = new Date(ts).toLocaleString('en-IN', {
+                day: '2-digit', month: 'short', year: 'numeric',
+                hour: '2-digit', minute: '2-digit', hour12: true
+            });
+            return {
+                html: `<span style="font-weight:700;">TEST</span><div style="font-size:11px;color:#64748b;font-weight:500;margin-top:2px;">${esc(when)}</div>`,
+                text: `TEST (${when})`
+            };
+        }
+    }
+
+    // Long batch ids — break into two lines for readability
+    if (raw.length > 14) {
+        const splitAt = raw.includes('-') ? raw.lastIndexOf('-') + 1 : 10;
+        const main = raw.slice(0, splitAt);
+        const rest = raw.slice(splitAt);
+        return {
+            html: `<span style="font-weight:700;">${esc(main)}</span>${rest ? `<div style="font-size:11px;color:#64748b;font-weight:500;margin-top:2px;">${esc(rest)}</div>` : ''}`,
+            text: rest ? `${main}${rest}` : main
+        };
+    }
+
+    return { html: esc(raw), text: raw };
+}
 
 /**
  * Process multiple RMC materials sequentially
@@ -3497,7 +3550,15 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
         const itemCodeSuffix = material.itemNo.substring(material.itemNo.length - 4);
         const originalSuffix = itemCodeSuffix;
         const supportsNumericSuffixEdit = /^\d{4}$/.test(itemCodeSuffix);
-        
+
+        // First process consumes raw material from the FBD-RM warehouse. When issuing from
+        // FBD-RM, the stock roll is slit down to the target produced width, so the produced
+        // quantity (KGS) is less than the issued quantity. Show a live estimate per batch.
+        const FBD_RM_WAREHOUSE = (typeof UNIT1_WAREHOUSES !== 'undefined' && UNIT1_WAREHOUSES.RM) ? UNIT1_WAREHOUSES.RM : 'FBD-RM';
+        const isFirstProcessRMIssue = String(material?.warehouse || '').trim().toUpperCase() === String(FBD_RM_WAREHOUSE).toUpperCase();
+        const poTargetWidthRaw = Number(selectedJob?.targetWidth);
+        const poTargetWidth = (Number.isFinite(poTargetWidthRaw) && poTargetWidthRaw > 0) ? poTargetWidthRaw : null;
+
         const modal = document.createElement('div');
         modal.className = 'rmc-modal';
         modal.style.cssText = `
@@ -3521,7 +3582,12 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                     <svg width="22" height="22" fill="currentColor" viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14l-5-5 1.41-1.41L12 14.17l4.59-4.58L18 11l-6 6z"/></svg>
                     Material Issue${progressText}
                 </h2>
-                <p style="margin: 0; font-size: 12px; opacity: 0.9;">Select batches and quantities to issue</p>
+                <p style="margin: 0; font-size: 12px; opacity: 0.9;">Select batches and quantities to issue (KGS)</p>
+            </div>
+            
+            <div style="padding: 10px 16px; background: #fffbeb; border-bottom: 1px solid #fde68a; flex-shrink: 0; font-size: 12px; color: #92400e;">
+                Planned: <strong>${material.plannedQuantity}</strong> KGS
+                ${(material.issuedQuantity || 0) > 0 ? ` &nbsp;|&nbsp; Already issued: <strong>${material.issuedQuantity}</strong> &nbsp;|&nbsp; Remaining: <strong>${material.remainingQuantity ?? (material.plannedQuantity - (material.issuedQuantity || 0))}</strong> KGS` : ''}
             </div>
             
             <div style="padding: 12px 16px; background: #faf5ff; border-bottom: 1px solid #e9d5ff; flex-shrink: 0;">
@@ -3534,6 +3600,17 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                     <span id="rmc-uom-badge" style="font-size: 11px; color: #fff; background: #7c3aed; padding: 2px 8px; border-radius: 10px; margin-left: 6px; font-weight: 700; display: none;"></span>
                 </div>
             </div>
+
+            ${isFirstProcessRMIssue ? `
+            <div style="padding: 12px 16px; background: #f0fdfa; border-bottom: 1px solid #99f6e4; flex-shrink: 0;">
+                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                    <label for="rmc-target-width" style="font-size: 13px; color: #0f766e; font-weight: 700;">Target Width (mm):</label>
+                    <input type="number" id="rmc-target-width" min="1" step="1" value="${poTargetWidth != null ? poTargetWidth : ''}" placeholder="e.g. 1280"
+                        style="width: 110px; padding: 6px 10px; border: 2px solid #5eead4; border-radius: 6px; font-size: 15px; font-weight: 700; text-align: center; background: white; color: #0f172a;">
+                    <span id="rmc-target-width-hint" style="font-size: 12px; color: #64748b;">${poTargetWidth != null ? `(PO: ${poTargetWidth} mm)` : '(PO width not available — enter manually)'}</span>
+                </div>
+                <div style="font-size: 11px; color: #0f766e; margin-top: 6px;">Forward: Produced = Issue Qty × (Target Width ÷ Roll Width). Reverse: enter Produced to get required Issue Qty.</div>
+            </div>` : ''}
             
             <div style="padding: 12px 16px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; flex-shrink: 0;">
                 <input type="text" id="rmc-search-input" placeholder="Search by Batch # or Width..." 
@@ -3547,7 +3624,7 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                 <div id="rmc-loading" style="padding: 40px; text-align: center; color: #64748b;">
                     <div style="font-size: 14px;">Loading batches...</div>
                 </div>
-                <table id="rmc-batch-table" style="width: 100%; min-width: 720px; border-collapse: collapse; display: none;">
+                <table id="rmc-batch-table" style="width: 100%; min-width: ${isFirstProcessRMIssue ? '820px' : '720px'}; border-collapse: collapse; display: none;">
                     <thead style="background: #f1f5f9; position: sticky; top: 0;">
                         <tr>
                             <th style="padding: 10px 8px; text-align: center; font-size: 11px; font-weight: 600; color: #64748b; width: 40px;"></th>
@@ -3557,6 +3634,7 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                             <th style="padding: 10px 8px; text-align: right; font-size: 11px; font-weight: 600; color: #64748b;">Width (mm)</th>
                             <th style="padding: 10px 8px; text-align: right; font-size: 11px; font-weight: 600; color: #64748b;">Available</th>
                             <th style="padding: 10px 8px; text-align: center; font-size: 11px; font-weight: 600; color: #64748b; width: 90px;">Issue Qty</th>
+                            ${isFirstProcessRMIssue ? `<th style="padding: 10px 8px; text-align: right; font-size: 11px; font-weight: 600; color: #0f766e; width: 100px;">Will Produce (kg)</th>` : ''}
                         </tr>
                     </thead>
                     <tbody id="rmc-batch-tbody"></tbody>
@@ -3586,6 +3664,9 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                 <button id="rmc-cancel-btn" style="padding: 10px 18px; background: white; color: #64748b; border: 1px solid #e2e8f0; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600;">
                     Cancel
                 </button>
+                <button id="rmc-partial-btn" style="display: none; padding: 10px 16px; background: #fffbeb; color: #92400e; border: 1px solid #fde68a; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 700;">
+                    Continue with issued qty
+                </button>
                 <button id="rmc-issue-btn" style="padding: 10px 20px; background: #7c3aed; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600;">
                     Issue Material
                 </button>
@@ -3610,9 +3691,24 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
         const totalIssueSpan = modal.querySelector('#rmc-total-issue');
         const totalAvailableSpan = modal.querySelector('#rmc-total-available');
         const cancelBtn = modal.querySelector('#rmc-cancel-btn');
+        const partialBtn = modal.querySelector('#rmc-partial-btn');
         const issueBtn = modal.querySelector('#rmc-issue-btn');
         const nextBtn = modal.querySelector('#rmc-next-btn');
         const contentDiv = modal.querySelector('#rmc-content-area');
+
+        const materialAlreadyIssued = Number(material.issuedQuantity || 0);
+        const materialRemaining = material.remainingQuantity ??
+            Math.max(0, (material.plannedQuantity || 0) - materialAlreadyIssued);
+
+        function updatePartialContinueOption() {
+            if (!partialBtn) return;
+            if (materialAlreadyIssued > 0 && allBatches.length === 0 && materialRemaining > 0) {
+                partialBtn.style.display = 'inline-block';
+                partialBtn.textContent = `Continue with ${materialAlreadyIssued} KGS issued`;
+            } else {
+                partialBtn.style.display = 'none';
+            }
+        }
         
         let currentItemCode = material.itemNo;
         let allBatches = [];
@@ -3665,16 +3761,140 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
             if (contentDiv && !contentDiv.contains(e.target)) e.preventDefault();
         }, { passive: false });
         
-        // Function to update total issue quantity
-        function updateTotals() {
-            let total = 0;
-            const qtyInputs = batchTbody.querySelectorAll('.batch-qty-input');
-            qtyInputs.forEach(input => {
-                const qty = parseFloat(input.value) || 0;
-                total += qty;
+        const targetWidthInput = modal.querySelector('#rmc-target-width');
+        let calcUpdating = false;
+        const activelyEditingProduce = new Set();
+        const produceDebounceTimers = new Map();
+
+        function getTargetWidthMm() {
+            return parseFloat(targetWidthInput?.value) || 0;
+        }
+
+        function getRollWidthForIdx(idx) {
+            const produceInput = batchTbody.querySelector(`.batch-produce-input[data-idx="${idx}"]`);
+            return parseFloat(produceInput?.dataset.width) || 0;
+        }
+
+        function enableBatchRowForIdx(idx) {
+            const checkbox = batchTbody.querySelector(`.batch-checkbox[data-idx="${idx}"]`);
+            const qtyInput = batchTbody.querySelector(`.batch-qty-input[data-idx="${idx}"]`);
+            const produceInput = batchTbody.querySelector(`.batch-produce-input[data-idx="${idx}"]`);
+            if (checkbox && !checkbox.checked) checkbox.checked = true;
+            if (qtyInput) qtyInput.disabled = false;
+            if (produceInput) produceInput.disabled = false;
+        }
+
+        // Forward: produced KGS = issued KGS × (target width ÷ roll width).
+        function syncProduceFromIssueQty(idx) {
+            if (!isFirstProcessRMIssue || activelyEditingProduce.has(idx)) return;
+            const qtyInput = batchTbody.querySelector(`.batch-qty-input[data-idx="${idx}"]`);
+            const produceInput = batchTbody.querySelector(`.batch-produce-input[data-idx="${idx}"]`);
+            if (!qtyInput || !produceInput) return;
+
+            const targetWidth = getTargetWidthMm();
+            const rollWidth = getRollWidthForIdx(idx);
+            const qty = parseFloat(qtyInput.value) || 0;
+
+            if (targetWidth > 0 && rollWidth > 0 && qty > 0) {
+                const produced = qty * (targetWidth / rollWidth);
+                produceInput.value = produced.toFixed(2);
+                produceInput.title = `${qty} × (${targetWidth} ÷ ${rollWidth}) = ${produced.toFixed(2)} kg`;
+            } else if (!qty) {
+                produceInput.value = '';
+                produceInput.title = '';
+            }
+        }
+
+        // Reverse: issue KGS = produced KGS × (roll width ÷ target width).
+        // Does NOT overwrite the produce field — keeps the value the operator typed.
+        function syncIssueQtyFromProduce(idx) {
+            if (!isFirstProcessRMIssue) return;
+            const qtyInput = batchTbody.querySelector(`.batch-qty-input[data-idx="${idx}"]`);
+            const produceInput = batchTbody.querySelector(`.batch-produce-input[data-idx="${idx}"]`);
+            if (!qtyInput || !produceInput) return;
+
+            const targetWidth = getTargetWidthMm();
+            const rollWidth = getRollWidthForIdx(idx);
+            const produced = parseFloat(produceInput.value) || 0;
+            const max = parseFloat(qtyInput.dataset.available) || 0;
+
+            if (produced > 0) enableBatchRowForIdx(idx);
+
+            if (targetWidth > 0 && rollWidth > 0 && produced > 0) {
+                const rawIssueQty = produced * (rollWidth / targetWidth);
+                let issueQty = rawIssueQty;
+                let capped = false;
+                if (issueQty > max) {
+                    issueQty = max;
+                    capped = true;
+                }
+                issueQty = Math.round(issueQty * 100) / 100;
+                qtyInput.value = issueQty > 0 ? String(issueQty) : '';
+                if (capped) {
+                    const actualProduced = issueQty * (targetWidth / rollWidth);
+                    produceInput.value = actualProduced.toFixed(2);
+                    produceInput.title = `Capped at ${max} kg stock → produces ${actualProduced.toFixed(2)} kg`;
+                } else {
+                    produceInput.title = `${produced} kg needs ${issueQty} kg issue (${rollWidth} ÷ ${targetWidth} × ${produced})`;
+                }
+            } else if (!produced) {
+                qtyInput.value = '';
+                produceInput.title = '';
+            } else if (targetWidth <= 0) {
+                produceInput.title = 'Enter Target Width (mm) first';
+            }
+        }
+
+        function runReverseProduceCalc(idx) {
+            if (calcUpdating) return;
+            calcUpdating = true;
+            try {
+                syncIssueQtyFromProduce(idx);
+                updateTotalsOnly();
+            } finally {
+                calcUpdating = false;
+            }
+        }
+
+        function updateProduceCells() {
+            if (!isFirstProcessRMIssue) return;
+            batchTbody.querySelectorAll('.batch-qty-input').forEach((input) => {
+                if (!input.disabled) syncProduceFromIssueQty(input.dataset.idx);
             });
-            totalIssueSpan.textContent = total.toFixed(0);
+        }
+
+        function updateTotalsOnly() {
+            let total = 0;
+            batchTbody.querySelectorAll('.batch-qty-input').forEach((input) => {
+                total += parseFloat(input.value) || 0;
+            });
+            totalIssueSpan.textContent = Math.abs(total - Math.round(total)) < 0.001
+                ? String(Math.round(total))
+                : total.toFixed(2);
             totalIssueSpan.style.color = total > 0 ? '#16a34a' : '#64748b';
+        }
+
+        function updateTotals() {
+            updateTotalsOnly();
+            updateProduceCells();
+        }
+
+        if (targetWidthInput) {
+            targetWidthInput.addEventListener('input', () => {
+                if (calcUpdating) return;
+                calcUpdating = true;
+                try {
+                    updateProduceCells();
+                    batchTbody.querySelectorAll('.batch-produce-input').forEach((input) => {
+                        if (!input.disabled && parseFloat(input.value) > 0) {
+                            syncIssueQtyFromProduce(input.dataset.idx);
+                        }
+                    });
+                    updateTotalsOnly();
+                } finally {
+                    calcUpdating = false;
+                }
+            });
         }
         
         // Function to render batch rows
@@ -3692,6 +3912,7 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
             };
             batchTbody.innerHTML = '';
             batches.forEach((batch, idx) => {
+                const batchDisplay = formatBatchForDisplay(batch.batchNumber);
                 const row = document.createElement('tr');
                 row.style.cssText = 'border-bottom: 1px solid #f1f5f9;';
                 row.innerHTML = `
@@ -3699,7 +3920,7 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                         <input type="checkbox" class="batch-checkbox" data-idx="${idx}" 
                             style="width: 18px; height: 18px; cursor: pointer;">
                     </td>
-                    <td style="padding: 8px; font-size: 14px; font-weight: 700; font-family: monospace; color: #1e293b;">${batch.batchNumber}${batch._warehouse ? `<div style="font-size:10px;color:#7c3aed;font-weight:600;margin-top:2px;">${batch._warehouse}</div>` : ''}</td>
+                    <td style="padding: 8px; font-size: 14px; font-family: monospace; color: #1e293b; line-height: 1.35;">${batchDisplay.html}${batch._warehouse ? `<div style="font-size:10px;color:#7c3aed;font-weight:600;margin-top:2px;font-family:system-ui,sans-serif;">${batch._warehouse}</div>` : ''}</td>
                     <td style="padding: 8px; font-size: 13px; color: #374151; font-weight: 500;">${gradeStr(batch)}</td>
                     <td style="padding: 8px; font-size: 13px; text-align: right; color: #374151;">${dim(batch, 'len')}</td>
                     <td style="padding: 8px; font-size: 13px; text-align: right; color: #374151;">${dim(batch, 'wid')}</td>
@@ -3710,6 +3931,12 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                             style="width: 70px; padding: 6px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 13px; text-align: center; font-weight: 600;"
                             disabled>
                     </td>
+                    ${isFirstProcessRMIssue ? `<td style="padding: 8px; text-align: center;">
+                        <input type="number" class="batch-produce-input" data-idx="${idx}" data-width="${dim(batch, 'wid')}"
+                            value="" min="0" step="any" placeholder="—"
+                            style="width: 80px; padding: 6px; border: 1px solid #5eead4; border-radius: 4px; font-size: 13px; text-align: center; font-weight: 600; background: #f0fdfa; color: #0f766e;"
+                            disabled>
+                    </td>` : ''}
                 `;
                 batchTbody.appendChild(row);
             });
@@ -3719,27 +3946,84 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                 cb.addEventListener('change', (e) => {
                     const idx = e.target.dataset.idx;
                     const qtyInput = batchTbody.querySelector(`.batch-qty-input[data-idx="${idx}"]`);
+                    const produceInput = batchTbody.querySelector(`.batch-produce-input[data-idx="${idx}"]`);
                     if (e.target.checked) {
                         qtyInput.disabled = false;
+                        if (produceInput) produceInput.disabled = false;
                         qtyInput.focus();
                     } else {
                         qtyInput.disabled = true;
                         qtyInput.value = '';
-                        updateTotals();
+                        if (produceInput) {
+                            produceInput.disabled = true;
+                            produceInput.value = '';
+                            produceInput.title = '';
+                        }
+                        updateTotalsOnly();
                     }
                 });
             });
             
-            // Add qty input event listeners
+            // Add qty input event listeners (forward calc)
             batchTbody.querySelectorAll('.batch-qty-input').forEach(input => {
                 input.addEventListener('input', () => {
-                    const max = parseFloat(input.dataset.available) || 0;
-                    const val = parseFloat(input.value) || 0;
-                    if (val > max) input.value = max;
-                    if (val < 0) input.value = 0;
-                    updateTotals();
+                    if (calcUpdating) return;
+                    calcUpdating = true;
+                    try {
+                        const max = parseFloat(input.dataset.available) || 0;
+                        let val = parseFloat(input.value) || 0;
+                        if (val > max) {
+                            val = max;
+                            input.value = max;
+                        }
+                        if (val < 0) {
+                            val = 0;
+                            input.value = 0;
+                        }
+                        syncProduceFromIssueQty(input.dataset.idx);
+                        updateTotalsOnly();
+                    } finally {
+                        calcUpdating = false;
+                    }
                 });
             });
+
+            // Produce input: reverse calc only after typing finishes (debounce / blur / Enter).
+            // Immediate calc on each keystroke was overwriting partial input (e.g. "1" while typing "125").
+            if (isFirstProcessRMIssue) {
+                batchTbody.querySelectorAll('.batch-produce-input').forEach(input => {
+                    const idx = input.dataset.idx;
+
+                    input.addEventListener('focus', () => {
+                        activelyEditingProduce.add(idx);
+                    });
+
+                    input.addEventListener('blur', () => {
+                        activelyEditingProduce.delete(idx);
+                        clearTimeout(produceDebounceTimers.get(idx));
+                        runReverseProduceCalc(idx);
+                    });
+
+                    input.addEventListener('keydown', (e) => {
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            input.blur();
+                        }
+                    });
+
+                    input.addEventListener('input', () => {
+                        const val = parseFloat(input.value);
+                        if (Number.isFinite(val) && val < 0) input.value = 0;
+                        if (input.value.trim() !== '') enableBatchRowForIdx(idx);
+
+                        clearTimeout(produceDebounceTimers.get(idx));
+                        produceDebounceTimers.set(idx, setTimeout(() => {
+                            if (!activelyEditingProduce.has(idx)) return;
+                            runReverseProduceCalc(idx);
+                        }, 500));
+                    });
+                });
+            }
         }
         
         // Smart warehouse list per machine category
@@ -3758,27 +4042,18 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                 p.includes('metallization');
         }
         function _getHolographicWarehouseList() {
-            const p = (machineInfo?.process || '').toLowerCase();
-            if (p.includes('embossing')) return ['II-EMB'];
-            if (p.includes('rewinding')) return ['II-RWD'];
-            if (p.includes('slitting')) return ['II-SLT'];
-            if (p.includes('metallisation') || p.includes('metallization')) return ['II-MLT'];
-            return ['II-EMB', 'II-RWD', 'II-SLT', 'II-MLT'];
+            return getUnit1WarehouseListForJob(selectedJob);
         }
         function getWarehouseSearchList() {
-            // Prefer warehouse from the Production Order line (one API call — fastest, correct for SAP).
             const lineWh = (material && material.warehouse) ? String(material.warehouse).trim() : '';
-            if (lineWh) return [lineWh];
-
-            if (_isSpotUV()) return ['II-SPUV', 'II-PST'];
-            if (typeof isDieCuttingMachine === 'function' && isDieCuttingMachine()) return ['II-DIE', 'II-EMB'];
-            if (typeof isFoilingMachine === 'function' && isFoilingMachine() &&
-                typeof isDieCuttingSubProcess === 'function' && isDieCuttingSubProcess()) return ['II-DIE', 'II-EMB'];
-            if (typeof isLaminationMachine === 'function' && isLaminationMachine()) return ['II-LAM', 'II-MPET'];
-            if (typeof isFoldingPastingMachine === 'function' && isFoldingPastingMachine()) return ['II-PST'];
-            if (_isHolographic()) return _getHolographicWarehouseList();
-            if (_isRigid()) return ['II-MKG', 'II-ASS'];
-            return ['II-FOI'];
+            if (lineWh) {
+                // PO line warehouse first, then process fallbacks (may have stock in related WH)
+                if (_isHolographic()) {
+                    return Array.from(new Set([lineWh, ..._getHolographicWarehouseList()]));
+                }
+                return [lineWh];
+            }
+            return _getHolographicWarehouseList();
         }
 
         let activeWarehouse = (material && material.warehouse) ? String(material.warehouse).trim() : '';
@@ -3825,18 +4100,45 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                     allBatches = combinedBatches;
                     filteredBatches = [...allBatches];
                     totalAvailableSpan.textContent = combinedTotal;
+
+                    const remaining = material.remainingQuantity ?? Math.max(0, (material.plannedQuantity || 0) - (material.issuedQuantity || 0));
+                    const plannedBanner = modal.querySelector('div[style*="fffbeb"]');
+                    if (plannedBanner && remaining > 0 && combinedTotal < remaining) {
+                        const shortfall = remaining - combinedTotal;
+                        const whHint = whList.join(', ');
+                        plannedBanner.innerHTML = `
+                            Planned: <strong>${material.plannedQuantity}</strong> KGS
+                            ${(material.issuedQuantity || 0) > 0 ? ` &nbsp;|&nbsp; Already issued: <strong>${material.issuedQuantity}</strong> &nbsp;|&nbsp; Remaining: <strong>${remaining}</strong> KGS` : ''}
+                            <div style="margin-top:6px;padding:6px 10px;background:#fef2f2;border:1px solid #fecaca;border-radius:6px;color:#b91c1c;font-size:11px;">
+                                Available stock (<strong>${combinedTotal} KGS</strong>) is less than needed (<strong>${remaining} KGS</strong>).
+                                Short by <strong>${shortfall} KGS</strong> in warehouse(s): ${whHint}.
+                            </div>`;
+                    }
                     
                     loadingDiv.style.display = 'none';
                     batchTable.style.display = 'table';
                     renderBatches(filteredBatches);
+                    updatePartialContinueOption();
                 } else {
                     loadingDiv.style.display = 'none';
                     noBatchesDiv.style.display = 'block';
-                    noBatchesDiv.querySelector('div:first-child').textContent = 'No batches found';
-                    noBatchesDiv.querySelector('div:last-child').textContent = `Searched warehouses: ${whList.join(', ')}`;
+                    if (materialAlreadyIssued > 0) {
+                        const prevHint = getUnit1PreviousProcessHint(selectedJob?.uPCode);
+                        noBatchesDiv.querySelector('div:first-child').textContent = 'No additional stock in warehouse';
+                        noBatchesDiv.querySelector('div:last-child').innerHTML =
+                            `${materialAlreadyIssued} KGS already issued to this job (remaining ${materialRemaining} KGS).<br>` +
+                            `Complete the previous process (${prevHint.process}) to receive stock in ${prevHint.warehouse},<br>` +
+                            `or click <strong>Continue with ${materialAlreadyIssued} KGS issued</strong> to start Running.`;
+                    } else {
+                        const prevHint = getUnit1PreviousProcessHint(selectedJob?.uPCode);
+                        noBatchesDiv.querySelector('div:first-child').textContent = 'No batches found';
+                        noBatchesDiv.querySelector('div:last-child').textContent =
+                            `No stock for this item. Searched: ${whList.join(', ')}. Complete ${prevHint.process} first.`;
+                    }
                     allBatches = [];
                     filteredBatches = [];
                     totalAvailableSpan.textContent = '0';
+                    updatePartialContinueOption();
                 }
             } catch (error) {
                 console.error('Error fetching batches:', error);
@@ -3856,10 +4158,12 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
             if (!query) {
                 filteredBatches = [...allBatches];
             } else {
-                filteredBatches = allBatches.filter(b => 
-                    (b.batchNumber && b.batchNumber.toLowerCase().includes(query)) ||
-                    (b.width && b.width.toString().includes(query))
-                );
+                filteredBatches = allBatches.filter(b => {
+                    const raw = (b.batchNumber || '').toLowerCase();
+                    const display = formatBatchForDisplay(b.batchNumber).text.toLowerCase();
+                    return raw.includes(query) || display.includes(query) ||
+                        (b.width && b.width.toString().includes(query));
+                });
             }
             renderBatches(filteredBatches);
         });
@@ -3902,13 +4206,19 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
         clearBtn.addEventListener('click', () => {
             const checkboxes = batchTbody.querySelectorAll('.batch-checkbox');
             const qtyInputs = batchTbody.querySelectorAll('.batch-qty-input');
-            
+            const produceInputs = batchTbody.querySelectorAll('.batch-produce-input');
+
             checkboxes.forEach((cb, i) => {
                 cb.checked = false;
                 qtyInputs[i].disabled = true;
                 qtyInputs[i].value = '';
+                if (produceInputs[i]) {
+                    produceInputs[i].disabled = true;
+                    produceInputs[i].value = '';
+                    produceInputs[i].title = '';
+                }
             });
-            updateTotals();
+            updateTotalsOnly();
         });
         
         // Cancel button
@@ -3916,6 +4226,25 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
             document.body.removeChild(overlay);
             resolve({ success: false, message: 'Material issue cancelled by user' });
         });
+
+        if (partialBtn) {
+            partialBtn.addEventListener('click', () => {
+                if (!confirm(
+                    `${materialAlreadyIssued} KGS is already issued to this job.\n\n` +
+                    `No additional stock was found in the warehouse.\n\n` +
+                    `Continue to Running with partial material (${materialAlreadyIssued} KGS)?`
+                )) {
+                    return;
+                }
+                document.body.removeChild(overlay);
+                resolve({
+                    success: true,
+                    partial: true,
+                    issuedQuantity: materialAlreadyIssued,
+                    message: `Continuing with ${materialAlreadyIssued} KGS already issued`
+                });
+            });
+        }
         
         // Issue button
         issueBtn.addEventListener('click', async () => {
@@ -3967,9 +4296,11 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                             lineNumber: material.lineNumber,
                             batchAllocations: batchAllocations,
                             warehouse: issueWarehouse || undefined,
-                            remarks: `Material issued via Data Entry WebApp - ${batchAllocations.length} batch(es), total ${totalQty}`,
+                            remarks: `PO ${documentNumber}: material issued via Data Entry WebApp - ${batchAllocations.length} batch(es), total ${totalQty}`,
                             itemCodeChanged: itemCodeWasChanged,
-                            originalItemCode: itemCodeWasChanged ? material.itemNo : undefined
+                            originalItemCode: itemCodeWasChanged ? material.itemNo : undefined,
+                            operatorName: currentOperator || undefined,
+                            machineName: machineInfo?.name || undefined
                         })
                     },
                     { absoluteEntry, documentNumber }
@@ -3988,7 +4319,7 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                     
                     // Show success message in the summary area
                     totalIssueSpan.parentElement.innerHTML = `
-                        <span style="color: #16a34a; font-weight: 600;">✓ Issued ${totalQty} sq m successfully</span>
+                        <span style="color: #16a34a; font-weight: 600;">✓ Issued ${totalQty} KGS successfully</span>
                     `;
                 } else {
                     alert(`Failed to issue material:\n${result.message || result.error || 'Unknown error'}`);
@@ -4387,71 +4718,35 @@ async function displayFetchedJob(jobData) {
     // (similar to PMT materials for PST jobs)
     // The rmcMaterialsNeedIssue array is preserved in jobData for later use
     
-    // Fetch best historical performance for this FG number
-    let estimates = null;
-    if (jobData.itemNo) {
-        try {
-            console.log(`📊 Fetching best performance for FG: ${jobData.itemNo}`);
-            const machineName = machineInfo?.name || null;
-            const response = await fetch(`/api/best-performance/${encodeURIComponent(jobData.itemNo)}${machineName ? `?machineName=${encodeURIComponent(machineName)}` : ''}`);
-            
-            if (response.ok) {
-                const data = await response.json();
-                if (data.success && data.estimates) {
-                    estimates = data.estimates;
-                    estimates.jobCount = data.performance?.jobCount || 0;
-                    // Machine names are already in data.estimates from server
-                    // Only override if not present
-                    if (!estimates.bestMakeReadyMachine) {
-                        estimates.bestMakeReadyMachine = data.performance?.bestMakeReadyMachine || null;
-                    }
-                    if (!estimates.bestRunningMachine) {
-                        estimates.bestRunningMachine = data.performance?.bestRunningMachine || null;
-                    }
-                    
-                    // Calculate estimated running time based on planned quantity
-                    // For DIE/EMB+P processes: historical data is in sheets, but plannedQuantity is in cartons
-                    // Need to convert cartons to sheets: sheets = cartons × baseQuantity
-                    // BaseQuantity = sheets per carton (e.g., 0.1 means 10 ups, so 1 sheet = 10 cartons)
-                    // Example: 50,000 cartons × 0.1 baseQty = 5,000 sheets
-                    if (estimates.bestRunningPerUnit && jobData.plannedQuantity) {
-                        const dieCutCode = (jobData.uPCode || jobData.processCode || '').toUpperCase();
-                        const baseQuantities = jobData.baseQuantities || [];
-                        const isDieCuttingProcess = (jobData.plannedQuantity || 0) > 0 &&
-                            isDieProcessCodeForBaseQty(dieCutCode) && baseQuantities.length > 0;
-                        
-                        if (isDieCuttingProcess) {
-                            // For die-cutting: convert cartons to sheets
-                            // plannedQuantity is in cartons, historical data is per sheet
-                            // sheets = cartons × baseQuantity (or cartons / ups)
-                            const avgBaseQuantity = Math.abs(baseQuantities[0]) || 1;
-                            const sheetsQuantity = jobData.plannedQuantity * avgBaseQuantity;
-                            estimates.estimatedRunningMinutes = estimates.bestRunningPerUnit * sheetsQuantity;
-                            estimates._calculatedForSheets = sheetsQuantity;
-                            console.log(`   📐 DIE/EMB+P conversion: ${jobData.plannedQuantity} cartons × ${avgBaseQuantity} baseQty = ${sheetsQuantity} sheets`);
-                        } else {
-                            // Standard calculation for non-die-cutting processes
-                            estimates.estimatedRunningMinutes = estimates.bestRunningPerUnit * jobData.plannedQuantity;
-                        }
-                    }
-                    
-                    console.log(`   ✅ Found ${estimates.jobCount} historical jobs`);
-                    console.log(`   Best MakeReady: ${estimates.bestMakeReadyMinutes} min (${estimates.bestMakeReadyMachine || 'unknown'})`);
-                    console.log(`   Best Running/Unit: ${estimates.bestRunningPerUnit?.toFixed(4)} min/unit (${estimates.bestRunningMachine || 'unknown'})`);
-                    if (estimates.estimatedRunningMinutes) {
-                        const unitLabel = estimates._calculatedForSheets ? 'sheets' : 'units';
-                        const quantity = estimates._calculatedForSheets || jobData.plannedQuantity;
-                        console.log(`   Estimated Running: ${estimates.estimatedRunningMinutes.toFixed(1)} min for ${quantity} ${unitLabel}`);
-                    }
-                } else {
-                    console.log(`   ℹ️ No historical data found for this FG`);
-                }
-            }
-        } catch (error) {
-            console.error('Error fetching best performance:', error);
+    // Warn if this PO was already finished in the current shift
+    const shiftDone = sessionCompletedJobs.find(
+        (j) => j.jobNumber === jobData.jobNumber || j.poNumber === jobData.jobNumber
+    );
+    if (shiftDone) {
+        const issued = getJobIssuedQtyForDisplay(jobData);
+        const doneQty = Math.max(jobData.completedQuantity || 0, shiftDone.sheetsProcessed || 0);
+        const embossingJob = isEmbossingJob(jobData);
+        const remaining = embossingJob ? null : Math.max(0, issued - doneQty);
+        if (!embossingJob && remaining <= 0) {
+            alert(
+                `PO ${jobData.jobNumber} is already fully completed this shift.\n\n` +
+                `Issued: ${issued} | Done: ${doneQty}\n\n` +
+                `See Shift Summary. Do not re-add unless supervisor approves rework.`
+            );
+            return;
+        }
+        const remainingLine = embossingJob
+            ? `Done (${doneQty}) may exceed RM issue (${issued}) — chemical weight on film.`
+            : `Remaining: ${remaining}`;
+        if (!confirm(
+            `PO ${jobData.jobNumber} was already worked this shift.\n\n` +
+            `Issued: ${issued} | Done: ${doneQty} | ${remainingLine}\n\n` +
+            `Add again to run another batch?`
+        )) {
+            return;
         }
     }
-    
+
     // Check for duplicate PO using validation module
     if (typeof ProductionValidation !== 'undefined') {
         const duplicateCheck = ProductionValidation.validateDuplicatePO(jobData.jobNumber, currentJobs);
@@ -4479,7 +4774,9 @@ async function displayFetchedJob(jobData) {
         itemNo: jobData.itemNo,
         plannedQuantity: jobData.plannedQuantity,
         completedQuantity: jobData.completedQuantity || 0,  // Already completed before this batch
-        issuedQuantity: jobData.issuedQuantity || 0,        // Total issued quantity from first line
+        issuedQuantity: jobData.issuedQuantity || 0,
+        materialIssuedQuantity: jobData.materialIssuedQuantity ?? jobData.issuedQuantity ?? 0,
+        materialPlannedQuantity: jobData.materialPlannedQuantity ?? 0,
         processCode: jobData.processCode,
         poNumber: jobData.poNumber || jobData.jobNumber,
         uPCode: jobData.uPCode || '',
@@ -4492,7 +4789,6 @@ async function displayFetchedJob(jobData) {
         rmcMaterialsNeedIssue: jobData.rmcMaterialsNeedIssue || [],  // RMC materials pending issue (FOI jobs)
         lamMaterialsNeedIssue: jobData.lamMaterialsNeedIssue || [],  // LAM materials (FIL/ADH) pending issue (LAM jobs)
         unissuedMaterialsNeedIssue: jobData.unissuedMaterialsNeedIssue || [],  // Other unissued materials
-        estimates: estimates,  // Historical best performance estimates
         state: 'In Queue',
         isActive: false,
         jobStartTime: null,  // Will be set when Make Ready or Running is first clicked
@@ -4829,14 +5125,9 @@ function handleStateChange(state) {
         }
     } else {
         // Fallback validation if module not loaded
-        // makeready, running, feeder_trip, sticky_sheets, and sorting_waiting require a job selection
-        const jobRequiredStates = ['running', 'makeready', 'feeder_trip', 'sticky_sheets', 'sorting_waiting'];
+        const jobRequiredStates = ['running', 'makeready'];
         if (jobRequiredStates.includes(state) && !selectedJob) {
-            if (state === 'feeder_trip' || state === 'sticky_sheets' || state === 'sorting_waiting') {
-                alert('Please select a job first to track Feeder Trip, Sticky Sheets, or Sorting Waiting time');
-            } else {
             alert('Please select a job first to track Make Ready or Running time');
-            }
             console.log('❌ Blocked: No job selected for production state');
             return;
         }
@@ -4857,10 +5148,26 @@ function handleStateChange(state) {
         }
     }
 
+    // Unit 1: all BOM lines fully issued in SAP → Running immediately (no popup)
+    if (state === 'running' && selectedJob && canSkipMaterialIssueForRunning(selectedJob)) {
+        console.log(`📦 All materials fully issued — skipping issue popups`);
+        selectedJob._materialIssueChecked = true;
+        proceedWithStateChange(state);
+        return;
+    }
+
     // Material issue checks before allowing Running state — FIRST TIME ONLY.
     // Once materials have been checked/issued for this job, subsequent Running presses
     // (e.g. resuming from lunch/breakdown) skip straight to proceedWithStateChange.
-    if (state === 'running' && selectedJob && machineInfo.name !== 'wity' && !selectedJob._materialIssueChecked) {
+    if (state === 'running' && selectedJob) {
+        // Re-check if SAP still has material to issue (e.g. partial issue from earlier session)
+        const pendingNow = getPendingMaterialsForRunning(selectedJob).length > 0;
+        if (selectedJob._materialIssueChecked && pendingNow) {
+            selectedJob._materialIssueChecked = false;
+        }
+    }
+
+    if (state === 'running' && selectedJob && !selectedJob._materialIssueChecked) {
         // Show an instant blocking overlay so the operator gets immediate feedback.
         // This makes the "Running" click feel responsive even if SAP fetch takes time.
         const _materialCheckOverlayId = 'material-check-overlay';
@@ -4955,11 +5262,10 @@ function handleStateChange(state) {
                 console.log('✅ PMT materials issued successfully');
             }
 
-            // --- Step 2: ADH — code capture dialog (LAM jobs) ---
-            // Capture ADH codes regardless of batchManaged (material will be issued on FINISH).
+            // --- Step 2: ADH code capture (LAM jobs on Unit 2 only — Unit 1 issues ADH at Running) ---
             const adhPending = (selectedJob.lamMaterialsNeedIssue || [])
                 .filter(m => (m?.itemNo || '').toUpperCase().startsWith('ADH'));
-            if (adhPending.length > 0 && !selectedJob.lamMaterialCodes) {
+            if (adhPending.length > 0 && !selectedJob.lamMaterialCodes && !isUnit1HolographicJob(selectedJob)) {
                 hideMaterialCheckOverlay();
                 console.log('📦 ADH materials need code capture:', adhPending);
                 const confirmResult = await showLAMMaterialConfirmDialog(
@@ -4976,44 +5282,88 @@ function handleStateChange(state) {
                 console.log('✅ ADH codes stored for job finish:', selectedJob.lamMaterialCodes);
             }
 
-            // --- Step 3: Batch issue modal for remaining batch-managed materials ---
-            // Non-batch materials are skipped entirely (issued automatically by SAP or handled elsewhere).
-            const batchCandidates = [
-                ...(selectedJob.unissuedMaterialsNeedIssue || []),
-                ...(selectedJob.rmcMaterialsNeedIssue || []),
-                ...((selectedJob.lamMaterialsNeedIssue || []).filter(m =>
-                    !(m?.itemNo || '').toUpperCase().startsWith('ADH'))),
-            ].filter(m => {
-                const code = (m?.itemNo || '').toUpperCase();
-                if (!code) return false;
-                if (code.startsWith('ADH')) return false;
-                if (code.startsWith('PMT')) return false;
-                if (!m.batchManaged) return false;
-                return true;
-            });
+            // --- Step 3: Issue each pending BOM component (batch or non-batch), in PO line order ---
+            const pendingMaterials = getPendingMaterialsForRunning(selectedJob);
+            const pmtCodes = new Set((selectedJob.pmtMaterialsNeedIssue || []).map(m => (m?.itemNo || '').toUpperCase()));
+            const adhCodes = new Set((selectedJob.lamMaterialsNeedIssue || [])
+                .filter(m => (m?.itemNo || '').toUpperCase().startsWith('ADH'))
+                .map(m => (m.itemNo || '').toUpperCase()));
 
-            for (let i = 0; i < batchCandidates.length; i++) {
-                const mat = batchCandidates[i];
+            let hadPartialMaterialContinue = false;
+            for (let i = 0; i < pendingMaterials.length; i++) {
+                const mat = pendingMaterials[i];
+                const code = (mat?.itemNo || '').toUpperCase();
+                if (!code || pmtCodes.has(code)) continue;
+                if (!isUnit1HolographicJob(selectedJob) && adhCodes.has(code)) continue;
+
+                const alreadyIssued = Number(mat.issuedQuantity || 0);
+                const manualDialog = needsManualMaterialIssueDialog(selectedJob, mat, pendingMaterials, i);
+
+                if (!manualDialog) {
+                    hideMaterialCheckOverlay();
+                    console.log(`📦 Auto-issuing (no popup): ${mat.itemNo} from ${mat.warehouse || 'WH'}`);
+                    const autoResult = await tryAutoIssueMaterialLine(selectedJob, mat);
+                    if (autoResult.success && !autoResult.partial && !autoResult.shortfall) {
+                        console.log(`✅ Auto-issued ${autoResult.issued || 0} KGS for ${mat.itemNo}`);
+                        continue;
+                    }
+                    if (autoResult.success && (autoResult.partial || autoResult.shortfall > 0)) {
+                        console.warn(`⚠️ Partial auto-issue for ${mat.itemNo}: issued ${autoResult.issued}, short ${autoResult.shortfall}`);
+                        hadPartialMaterialContinue = true;
+                        continue;
+                    }
+                    if (alreadyIssued > 0) {
+                        console.log(`📦 Auto-issue unavailable; continuing with ${alreadyIssued} KGS already issued`);
+                        hadPartialMaterialContinue = true;
+                        continue;
+                    }
+                    hideMaterialCheckOverlay();
+                    alert(
+                        `Cannot auto-issue ${mat.itemNo}.\n\n` +
+                        `${autoResult.message || 'No stock in warehouse.'}\n\n` +
+                        `Complete the previous process to receive stock in ${mat.warehouse || 'the input warehouse'}.`
+                    );
+                    return;
+                }
+
+                if (mat.batchManaged === undefined) {
+                    mat.batchManaged = await isBatchManagedItem(mat.itemNo);
+                }
+
                 hideMaterialCheckOverlay();
-                const result = await showRMCBatchIssueDialog(
-                    mat,
-                    selectedJob.absoluteEntry,
-                    selectedJob.plannedQuantity,
-                    selectedJob.jobNumber,
-                    i + 1,
-                    batchCandidates.length,
-                    i === batchCandidates.length - 1
-                );
+                let result;
+                if (mat.batchManaged) {
+                    result = await showRMCBatchIssueDialog(
+                        mat,
+                        selectedJob.absoluteEntry,
+                        selectedJob.plannedQuantity,
+                        selectedJob.jobNumber,
+                        i + 1,
+                        pendingMaterials.length,
+                        i === pendingMaterials.length - 1
+                    );
+                } else {
+                    result = await showNonBatchMaterialIssueDialog(
+                        mat,
+                        selectedJob.absoluteEntry,
+                        selectedJob.plannedQuantity,
+                        selectedJob.jobNumber,
+                        i + 1,
+                        pendingMaterials.length
+                    );
+                }
                 if (!result || result.success !== true) return;
+                if (result.partial) hadPartialMaterialContinue = true;
             }
 
-            // Clear all material arrays after successful processing
-            selectedJob.unissuedMaterialsNeedIssue = [];
+            if (!hadPartialMaterialContinue) {
+                selectedJob.unissuedMaterialsNeedIssue = [];
+            }
             selectedJob.pmtMaterialsNeedIssue = [];
             selectedJob.rmcMaterialsNeedIssue = [];
             selectedJob.lamMaterialsNeedIssue = [];
 
-            // Mark material issue as done so subsequent Running presses skip this block
+            await refreshSAPDataForJob(selectedJob);
             selectedJob._materialIssueChecked = true;
             proceedWithStateChange(state);
             } finally {
@@ -5689,28 +6039,6 @@ function getMachineCode(machineName) {
     
     // Define machine code mappings
     const machineCodeMap = {
-        'nova-cut-1': 'NC1',
-        'nova-cut-2': 'NC2',
-        'nova-cut-3': 'NC3',
-        'ambition': 'AMB',
-        'bobst': 'BOB',
-        'heidelberg': 'HDB',
-        'komori': 'KMR',
-        'narendra': 'NAR',
-        'polar': 'POL',
-        'stahl': 'STL',
-        'wohlenberg': 'WHL',
-        'mk-foiling': 'MKF',
-        'manual-mf': 'MMF',
-        'manual-mdc-1': 'MM1',
-        'manual-mdc-2': 'MM2',
-        'manual-mdc-3': 'MM3',
-        'manual-mdc-4': 'MM4',
-        'visionfold': 'VIS',
-        'nova-fold': 'NOV',
-        'yilee': 'YIL',
-        'yong-shun': 'YON',
-        'wity': 'WIT',
         'embossing-1': 'EM1',
         'embossing-2': 'EM2',
         'embossing-3': 'EM3',
@@ -5882,43 +6210,13 @@ function showTicketErrorNotification(message) {
     }, 5000);
 }
 
-// Check if current machine is a Lamination machine
-function isLaminationMachine() {
-    return machineInfo.process && machineInfo.process.toLowerCase().includes('lamination');
-}
-
-// Check if current machine is Narendra (special lamination machine)
-function isNarendraMachine() {
-    return machineInfo.name && machineInfo.name.toLowerCase() === 'narendra';
-}
-
-// Check if current machine is a Folding & Pasting machine
-function isFoldingPastingMachine() {
-    return machineInfo.process && machineInfo.process.toLowerCase().includes('pasting-folding');
-}
-
-// Check if current machine is a DieCutting machine
-function isDieCuttingMachine() {
-    const process = machineInfo.process?.toLowerCase() || '';
-    return process.includes('diecutting') || process.includes('die-cutting') || process.includes('die cutting');
-}
-
-// Check if current machine is a Foiling machine
-function isFoilingMachine() {
-    const process = machineInfo.process?.toLowerCase() || '';
-    return process.includes('foiling');
-}
-
-// Check if the current sub-process is a DieCutting type process
-// This is used when Foiling machines run DIE/EMB jobs
-function isDieCuttingSubProcess() {
-    const subProcess = machineInfo.subProcess?.toLowerCase() || '';
-    return subProcess.includes('diecutting') || 
-           subProcess.includes('die cutting') || 
-           subProcess === 'embossing' ||
-           subProcess.includes('embossing') ||
-           subProcess.includes('striping');
-}
+// Unit 1 only — legacy Unit 2 machine-type checks (always false)
+function isLaminationMachine() { return false; }
+function isNarendraMachine() { return false; }
+function isFoldingPastingMachine() { return false; }
+function isDieCuttingMachine() { return false; }
+function isFoilingMachine() { return false; }
+function isDieCuttingSubProcess() { return false; }
 
 // Sheet→carton base-qty logic applies when U_PCode starts with DIE (e.g. DIE, DIE-TOP) or is EMB+P
 function isDieProcessCodeForBaseQty(uPCode) {
@@ -5931,27 +6229,7 @@ function isDieProcessCodeForBaseQty(uPCode) {
 // This is needed because previous process issues in SHEETS but completion report is in CARTONS
 // Also applies to Foiling machines running DieCutting sub-processes
 // @param {string} uPCodeOverride - Optional U_PCode to use instead of selectedJob.uPCode
-function shouldApplyBaseQuantityDivision(uPCodeOverride) {
-    // Check if it's a DieCutting machine OR a Foiling machine running DieCutting sub-process
-    const isDieCuttingContext = isDieCuttingMachine() || (isFoilingMachine() && isDieCuttingSubProcess());
-    
-    if (!isDieCuttingContext) {
-        return false;
-    }
-    
-    // Get the U_PCode - use override if provided, otherwise from selectedJob
-    const uPCode = (uPCodeOverride || selectedJob?.uPCode || '').toUpperCase();
-    
-    // For U_PCode starting with DIE or EMB+P, we need to divide by base quantity
-    // Because: Previous process issues in SHEETS, but we complete in CARTONS
-    // For U_PCode = 'EMB' (embossing only), no division needed (same unit)
-    if (isDieProcessCodeForBaseQty(uPCode)) {
-        console.log(`📊 Base quantity division ENABLED for U_PCode: ${uPCode}`);
-        return true;
-    }
-    
-    // For 'EMB' (embossing only) or other codes, no division
-    console.log(`📊 Base quantity division DISABLED for U_PCode: ${uPCode}`);
+function shouldApplyBaseQuantityDivision() {
     return false;
 }
 
@@ -5978,7 +6256,7 @@ function calculateDieCuttingQuantityForSAP(quantityProcessed, baseQuantities) {
 
 // Check if machine requires process selection (DieCutting, Folding/Pasting, or Foiling)
 function requiresProcessSelection() {
-    return isDieCuttingMachine() || isFoldingPastingMachine() || isFoilingMachine();
+    return false;
 }
 
 // Show process selection reminder popup
@@ -6128,6 +6406,8 @@ function showFinishJobModal() {
         return;
     }
 
+    flushCurrentStateTimeToJob();
+
     // Use validation module if available
     if (typeof ProductionValidation !== 'undefined') {
         const validationResult = ProductionValidation.validateJobState(selectedJob);
@@ -6147,36 +6427,8 @@ function showFinishJobModal() {
     // Configure modal fields based on machine type
     configureFinishModalFields();
 
-    // Jumbled job: show FG breakdown when PO has multiple outputs
-    const sheetsEl = document.getElementById('sheets-processed');
-    const sheetsVal = parseInt(sheetsEl?.value, 10) || 0;
-    if (typeof JumbledJob !== 'undefined') {
-        JumbledJob.refreshJumbledFinishUI(selectedJob, sheetsVal, {
-            applyDieDivision: shouldApplyBaseQuantityDivision()
-        });
-    }
-    
     showModal('finish-modal-overlay');
 }
-
-/** Recalculate per-FG quantities when sheets processed changes (jumbled jobs). */
-function updateJumbledFGQuantities() {
-    if (!selectedJob || typeof JumbledJob === 'undefined') return;
-    const sheets = parseInt(document.getElementById('sheets-processed')?.value, 10) || 0;
-    JumbledJob.refreshJumbledFinishUI(selectedJob, sheets, {
-        applyDieDivision: shouldApplyBaseQuantityDivision()
-    });
-}
-window.updateJumbledFGQuantities = updateJumbledFGQuantities;
-
-/** Recalculate jumbled FG breakdown on the final submission (summary) form. */
-function updateJumbledSummaryFGQuantities() {
-    if (!pendingJobData?.isJumbledJob || typeof JumbledJob === 'undefined') return;
-    const sheets = parseInt(document.getElementById('summary-sheets-processed')?.value, 10) || 0;
-    pendingJobData.sheetsProcessed = sheets;
-    pendingJobData.fgLinesWithQty = JumbledJob.refreshJumbledSummaryFromJob(pendingJobData);
-}
-window.updateJumbledSummaryFGQuantities = updateJumbledSummaryFGQuantities;
 
 // Store job data temporarily for summary modal
 let pendingJobData = null;
@@ -6217,14 +6469,7 @@ function getFoldingNumCartons(formData) {
 function handleFinishJob(e) {
     e.preventDefault();
 
-    // Save current state time before finishing
-    if (currentMachineState && timerInterval) {
-        stateTimers[currentMachineState] = timerSeconds;
-
-        if (selectedJob && selectedJob.timeBreakdown) {
-            selectedJob.timeBreakdown[currentMachineState] = timerSeconds;
-        }
-    }
+    flushCurrentStateTimeToJob();
 
     const formData = new FormData(e.target);
     
@@ -6345,6 +6590,16 @@ function handleFinishJob(e) {
     // 3. Compare both in cartons
     
     const rawIssuedQtyForValidation = selectedJob.issuedQuantity || 0;
+    const unit1FinishJob = isUnit1HolographicJob(selectedJob);
+
+    if (unit1FinishJob) {
+        const matIssued = selectedJob.materialIssuedQuantity ?? selectedJob.issuedQuantity ?? 0;
+        if (matIssued <= 0) {
+            alert('❌ Material not issued yet.\n\nPlease issue raw material (Running state) before finishing the job.');
+            return;
+        }
+    }
+
     // Wity: skip remaining/issue validations, only require IssuedQty > 0 for report completion.
     if (machineInfo.name === 'wity') {
         if (rawIssuedQtyForValidation <= 0) {
@@ -6375,7 +6630,7 @@ function handleFinishJob(e) {
         }
     }
     
-    const remainingQty = issuedQty - completedQty;
+    const remainingQty = computeJobRemainingQty(selectedJob);
     
     // Calculate what the final SAP quantity will be (in cartons for DIE/EMB+P)
     let finalSAPQuantity = sheetsProcessed;
@@ -6385,37 +6640,12 @@ function handleFinishJob(e) {
         console.log(`📊 Quantity validation - DieCutting calculation: ${sheetsProcessed} sheets → ${finalSAPQuantity} cartons`);
     }
 
-    // Jumbled (multi-output) job validation
-    const isJumbled = typeof JumbledJob !== 'undefined' && JumbledJob.isJumbledJobFromData(selectedJob);
-    let fgLinesWithQty = [];
-    if (isJumbled) {
-        const applyDie = shouldApplyBaseQuantityDivision();
-        fgLinesWithQty = JumbledJob.calculateFgLinesQuantities(
-            sheetsProcessed,
-            JumbledJob.getFgLinesFromJob(selectedJob),
-            { applyDieDivision: applyDie, baseQuantities }
-        );
-        const mainFgLine = fgLinesWithQty.find((l) => l && l.isByProduct !== true) || fgLinesWithQty[0];
-        const jumbledValidation = JumbledJob.validateJumbledCompletion(sheetsProcessed, fgLinesWithQty, {
-            applyDieDivision: applyDie,
-            baseQuantities,
-            issuedQuantity: rawIssuedQtyForValidation,
-            completedQuantity: completedQty,
-            skipRemainingCheck: machineInfo.name === 'wity',
-            headerCompletionQty: mainFgLine?.quantity ?? finalSAPQuantity
-        });
-        if (!jumbledValidation.valid) {
-            alert('❌ ' + jumbledValidation.message);
-            return;
-        }
-        console.log('🧩 Jumbled FG quantities:', fgLinesWithQty.map((l) => `${l.itemNo}=${l.quantity}`).join(', '));
-    }
+    const embossingFinishJob = isEmbossingJob(selectedJob);
+    console.log(`📊 Quantity validation: IssuedQty=${issuedQty}, CompletedQty=${completedQty}, RemainingQty=${remainingQty}, FinalSAPQty=${finalSAPQuantity}, embossing=${embossingFinishJob}`);
     
-    console.log(`📊 Quantity validation: IssuedQty=${issuedQty} (cartons), CompletedQty=${completedQty}, RemainingQty=${remainingQty}, FinalSAPQty=${finalSAPQuantity}`);
-    
-    // Only validate if we have issued quantity data (> 0) — skip for jumbled (validated above) and Wity
-    // Wity: explicitly skips this remaining validation
-    if (!isJumbled && machineInfo.name !== 'wity' && issuedQty > 0 && finalSAPQuantity > remainingQty) {
+    // Embossing: allow done > issued (chemical adds weight; not issued separately in SAP).
+    if (!embossingFinishJob && machineInfo.name !== 'wity' &&
+        (unit1FinishJob || issuedQty > 0) && finalSAPQuantity > remainingQty) {
         const isDieCutting = shouldApplyBaseQuantityDivision() && baseQuantities.length > 0;
         let errorMsg = `❌ Quantity Exceeds Remaining!\n\n`;
         
@@ -6433,7 +6663,7 @@ function handleFinishJob(e) {
             errorMsg += `Already Completed: ${completedQty}\n`;
             errorMsg += `Remaining to Complete: ${remainingQty}\n\n`;
             errorMsg += `Your Entry: ${sheetsProcessed}\n\n`;
-            errorMsg += `The quantity processed (${sheetsProcessed}) exceeds the remaining quantity (${remainingQty}).\n`;
+            errorMsg += `The quantity processed (${sheetsProcessed}) exceeds the issued quantity available (${remainingQty}).\n`;
             errorMsg += `Please reduce the quantity.`;
         }
         
@@ -6453,32 +6683,15 @@ function handleFinishJob(e) {
         wastedSheets: wastedSheets,
         machineSpeed: machineSpeed,
         remarks: remarks,
-        // Special flags for machine types
-        isLamination: isLaminationMachine(),
-        isNarendra: isNarendraMachine(),
-        isFoldingPasting: isFoldingPastingMachine(),
-        isDieCutting: isDieCuttingMachine() || (isFoilingMachine() && isDieCuttingSubProcess()),
-        isFoiling: isFoilingMachine(),
-        // Base quantities for DieCutting calculation
         baseQuantities: selectedJob.baseQuantities || [],
-        // U_PCode for determining if base quantity division is needed (DIE, EMB+P need division)
         uPCode: selectedJob.uPCode || '',
-        // Use the actual job start time captured when Make Ready/Running was first clicked
         jobStartTime: selectedJob.jobStartTime || getISTTimestamp(),
-        completedAt: getISTTimestamp(),  // Use IST for completion time
+        completedAt: getISTTimestamp(),
         shift: getCurrentShift(),
-        // SAP posting fields
-        absoluteEntry: selectedJob.absoluteEntry || null,  // SAP AbsoluteEntry
+        absoluteEntry: selectedJob.absoluteEntry || null,
         uJobEnt: selectedJob.uJobEnt ?? null,
         poNumber: selectedJob.poNumber || selectedJob.jobNumber,
-        packingDetails: '',  // Will be populated from form if folding/pasting
-        // LAM material codes (captured at Running state, issued at job finish)
-        lamMaterialCodes: selectedJob.lamMaterialCodes || null,
-        // Jumbled (multi-output) job
-        isJumbledJob: isJumbled,
-        applyDieDivision: shouldApplyBaseQuantityDivision(),
-        fgLines: selectedJob.fgLines || [],
-        fgLinesWithQty: isJumbled ? fgLinesWithQty : [],
+        packingDetails: '',
         timeBreakdown: selectedJob.timeBreakdown ? { ...selectedJob.timeBreakdown } : {
             makeready: stateTimers.makeready || 0,
             running: stateTimers.running || 0,
@@ -6536,9 +6749,12 @@ function showJobSummaryModal(data) {
     // Ensure timeBreakdown exists
     const timeBreakdown = data.timeBreakdown || {};
 
-    // Get values with defaults
-    const makereadyTime = timeBreakdown.makeready || 0;
-    const runningTime = timeBreakdown.running || 0;
+    // Get values with defaults (include live timers if state not yet saved to breakdown)
+    const makereadyTime = Math.max(timeBreakdown.makeready || 0, stateTimers.makeready || 0);
+    let runningTime = Math.max(timeBreakdown.running || 0, stateTimers.running || 0);
+    if (currentMachineState === 'running' && timerSeconds > runningTime) {
+        runningTime = timerSeconds;
+    }
 
     // Calculate total session time
     const totalSessionTime = Object.values(timeBreakdown).reduce((a, b) => a + b, 0);
@@ -6618,12 +6834,6 @@ function showJobSummaryModal(data) {
         if (packingGroup) packingGroup.style.display = 'none';
     }
 
-    if (typeof JumbledJob !== 'undefined' && data.isJumbledJob) {
-        data.fgLinesWithQty = JumbledJob.refreshJumbledSummaryFromJob(data);
-    } else if (typeof JumbledJob !== 'undefined') {
-        JumbledJob.refreshJumbledSummaryUI([]);
-    }
-
     // Make fields DISABLED by default - only editable after clicking Edit button
     // MakeReady and Running time are NOT editable (read-only)
     const editableFields = [
@@ -6673,12 +6883,25 @@ function showJobSummaryModal(data) {
 }
 
 // Confirm job finish
-function confirmJobFinish() {
+async function confirmJobFinish() {
     if (!pendingJobData) {
         console.error('No pending job data');
         return;
     }
+    if (_jobSubmitInProgress) {
+        console.warn('Job submit already in progress — ignoring duplicate click');
+        return;
+    }
 
+    _jobSubmitInProgress = true;
+    const confirmBtn = document.getElementById('summary-confirm-btn');
+    const confirmBtnLabel = confirmBtn ? confirmBtn.textContent : '';
+    if (confirmBtn) {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = 'Saving...';
+    }
+
+    try {
     // Get form values
     const makereadyTimeInput = document.getElementById('summary-makeready-time').value;
     const runningTimeInput = document.getElementById('summary-running-time').value;
@@ -6731,19 +6954,6 @@ function confirmJobFinish() {
     pendingJobData.machineSpeed = 0;
     pendingJobData.remarks = document.getElementById('summary-remarks').value;
 
-    if (pendingJobData.isJumbledJob && typeof JumbledJob !== 'undefined') {
-        const applyDie = pendingJobData.applyDieDivision ?? shouldApplyBaseQuantityDivision(pendingJobData.uPCode);
-        pendingJobData.fgLinesWithQty = JumbledJob.calculateFgLinesQuantities(
-            pendingJobData.sheetsProcessed,
-            JumbledJob.getFgLinesFromJob(pendingJobData),
-            {
-                applyDieDivision: applyDie,
-                baseQuantities: pendingJobData.baseQuantities || []
-            }
-        );
-        JumbledJob.refreshJumbledSummaryUI(pendingJobData.fgLinesWithQty);
-    }
-    
     // Update packing details if folding/pasting machine
     const packingDetailsInput = document.getElementById('summary-packing-details');
     if (packingDetailsInput && packingDetailsInput.value) {
@@ -6754,13 +6964,25 @@ function confirmJobFinish() {
     pendingJobData.timeBreakdown.makeready = makereadySeconds;
     pendingJobData.timeBreakdown.running = runningSeconds;
 
+    const completedJob = { ...pendingJobData };
+    pendingJobData = null;
+    const operatorForJob = getOperatorForSubmission();
+
+    // Save to database + SAP first so we can show accurate status
+    const saveResult = await completeJobInDatabase(
+        completedJob,
+        makereadySeconds,
+        runningSeconds,
+        operatorForJob
+    );
+
     // Add to completed jobs (session + persisted list for summary)
-    completedJobs.push(pendingJobData);
-    sessionCompletedJobs.push(pendingJobData);
+    completedJobs.push(completedJob);
+    sessionCompletedJobs.push(completedJob);
     saveShiftSessionToStorage();
 
     // Remove from current jobs
-    currentJobs = currentJobs.filter(job => job.jobNumber !== pendingJobData.jobNumber);
+    removeJobFromQueue(completedJob.jobNumber);
 
     // Clear active job tracking
     activeJobNumber = null;
@@ -6829,9 +7051,6 @@ function confirmJobFinish() {
     closeModal('job-summary-modal-overlay');
     closeModal('finish-modal-overlay');
 
-    // Clear pending data
-    const completedJob = pendingJobData;
-    pendingJobData = null;
     currentJobId = null;
     
     // Clear timestamp tracking
@@ -6839,7 +7058,6 @@ function confirmJobFinish() {
     accumulatedStateTime = 0;
 
     // Keep operator on screen and in storage until clock out
-    const operatorForJob = getOperatorForSubmission();
     persistShiftOperator();
     
     // Save updated state to localStorage (includes operator + shiftLoginAt)
@@ -6847,12 +7065,44 @@ function confirmJobFinish() {
     updateShiftFooterDisplay();
     updateClockButtonUI();
 
-    // Save job completion to database
-    completeJobInDatabase(completedJob, makereadySeconds, runningSeconds, operatorForJob);
+    const qtyLine = `Quantity Processed: ${completedJob.sheetsProcessed}\nWasted: ${completedJob.wastedSheets}`;
+    if (saveResult?.duplicate) {
+        alert(`ℹ️ Job ${completedJob.jobNumber} was already saved.\n\n${qtyLine}\n\nDuplicate submit ignored.`);
+    } else if (saveResult?.success && saveResult.sapPosted) {
+        let msg = `✅ Job ${completedJob.jobNumber} completed successfully!\n\n${qtyLine}`;
+        if (saveResult.autoIssue?.success) {
+            msg += `\n\nAuto-issued to ${saveResult.autoIssue.targetProcess} PO ${saveResult.autoIssue.targetPO}`;
+        }
+        alert(msg);
+    } else if (saveResult?.success && saveResult.sapPosted === false) {
+        const sapErr = String(saveResult.sapError || 'Unknown error');
+        const unit1Job = isUnit1HolographicJob(completedJob);
+        let hint = '';
+        if (/bin location|OHJW-U1|1470000341/i.test(sapErr)) {
+            hint = '\n\nCoating output goes to warehouse OHJW-U1 — SAP admin must set default bin for this item in OHJW-U1.';
+        } else if (unit1Job) {
+            hint = '\n\nUnit 1 does not post machine resources or running cost — only report completion + auto-issue.';
+        }
+        alert(
+            `⚠️ Job ${completedJob.jobNumber} saved locally but SAP report completion FAILED.\n\n${qtyLine}` +
+            `\n\nSAP Error: ${sapErr}` +
+            hint +
+            `\n\nData entry is saved in Shift Summary. Fix SAP setup above, then re-finish remaining qty or post manually in SAP.`
+        );
+    } else if (saveResult?.success === false) {
+        alert(`❌ Job ${completedJob.jobNumber} could not be saved.\n\n${saveResult.error || 'Unknown error'}`);
+    } else {
+        alert(`⚠️ Job ${completedJob.jobNumber} finished on screen.\n\n${qtyLine}\n\nCould not confirm server save — check console.`);
+    }
 
-    alert(`✅ Job ${completedJob.jobNumber} completed successfully!\n\nQuantity Processed: ${completedJob.sheetsProcessed}\nWasted: ${completedJob.wastedSheets}`);
-
-    console.log('Job confirmed and finished:', completedJob);
+    console.log('Job confirmed and finished:', completedJob, saveResult);
+    } finally {
+        _jobSubmitInProgress = false;
+        if (confirmBtn) {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = confirmBtnLabel || 'Confirm';
+        }
+    }
 }
 
 // Save completed job to database with all activities
@@ -6901,7 +7151,10 @@ async function completeJobInDatabase(jobData, makereadySeconds, runningSeconds, 
             operator_name: operatorToSend || 'Unknown',
             shift_type: getCurrentShift(),
             machine_name: machineInfo.name || 'Unknown',
-            process_name: machineInfo.subProcess || formatProcessName(machineInfo.process) || 'Unknown',
+            process_name: getUnit1ProcessNameFromUPCode(
+                jobData.uPCode,
+                machineInfo.subProcess || formatProcessName(machineInfo.process)
+            ) || 'Unknown',
             planned_qty: jobData.plannedQuantity || 0,
             job_start_time: jobData.jobStartTime,  // Actual start time when job began
             job_end_time: jobEndTime,               // Current time when submitting
@@ -6914,14 +7167,7 @@ async function completeJobInDatabase(jobData, makereadySeconds, runningSeconds, 
             absolute_entry: jobData.absoluteEntry || null,  // SAP AbsoluteEntry for InventoryGenEntries
             packing_details: jobData.packingDetails || '',   // Packing details (U_nopkg)
             u_job_ent: jobData.uJobEnt ?? null,
-            u_p_code: jobData.uPCode || '',
-            // LAM material codes for proportional issue at job finish
-            lam_material_codes: jobData.lamMaterialCodes || null,
-            // Jumbled (multi-output) production order
-            is_jumbled_job: !!(jobData.isJumbledJob && jobData.fgLinesWithQty?.length > 1),
-            fg_lines: (jobData.isJumbledJob && jobData.fgLinesWithQty?.length > 1 && typeof JumbledJob !== 'undefined')
-                ? JumbledJob.buildFgLinesPayload(jobData.fgLinesWithQty)
-                : null
+            u_p_code: jobData.uPCode || ''
         };
         
         // Debug: Log SAP posting fields
@@ -7045,26 +7291,11 @@ async function completeJobInDatabase(jobData, makereadySeconds, runningSeconds, 
             
             // Log and display auto-issue results
             if (result.autoIssue) {
-                if (result.autoIssue.isJumbledJob) {
-                    console.log('📤 Jumbled Job Auto-Issue Results:');
-                    console.log(`   Total FG Items: ${result.autoIssue.totalFGItems}`);
-                    console.log(`   Successful Issues: ${result.autoIssue.successfulIssues}`);
-                    if (result.autoIssue.results) {
-                        result.autoIssue.results.forEach(r => {
-                            console.log(`   ${r.success ? '✅' : '❌'} ${r.fgItemCode}: ${r.success ? `Issued ${r.totalIssued} to ${r.targetProcess} PO ${r.targetPO}` : r.error}`);
-                        });
-                    }
-                    // Display results in UI
-                    if (typeof JumbledJob !== 'undefined') {
-                        JumbledJob.displayJumbledJobResults(result.autoIssue);
-                    }
-                } else {
-                    console.log('📤 Auto-Issue Status:', result.autoIssue.success ? '✅ SUCCESS' : '❌ FAILED');
-                    if (result.autoIssue.success) {
-                        console.log(`   Issued ${result.autoIssue.totalIssued} to ${result.autoIssue.targetProcess} PO ${result.autoIssue.targetPO}`);
-                    } else if (result.autoIssue.error) {
-                        console.log(`   Error: ${result.autoIssue.error}`);
-                    }
+                console.log('📤 Auto-Issue Status:', result.autoIssue.success ? '✅ SUCCESS' : '❌ FAILED');
+                if (result.autoIssue.success) {
+                    console.log(`   Issued ${result.autoIssue.totalIssued} to ${result.autoIssue.targetProcess} PO ${result.autoIssue.targetPO}`);
+                } else if (result.autoIssue.error) {
+                    console.log(`   Error: ${result.autoIssue.error}`);
                 }
             }
             
@@ -7096,18 +7327,20 @@ async function completeJobInDatabase(jobData, makereadySeconds, runningSeconds, 
 
             // Store batch number in completed job for reference
             jobData.batchNum = result.batch_num;
-        } else {
-            console.error('❌ Failed to save job:', result.error);
+            return result;
         }
+
+        console.error('❌ Failed to save job:', result.error);
+        return { success: false, error: result.error };
 
     } catch (error) {
         if (error.name === 'AbortError') {
             console.warn('⚠️ Database save timed out - continuing without database');
-        } else {
-            console.error('❌ Error saving job to database:', error);
-            console.error('Error details:', error.message);
+            return { success: false, error: 'Save timed out' };
         }
-        // Don't block the UI - job is still completed locally via localStorage
+        console.error('❌ Error saving job to database:', error);
+        console.error('Error details:', error.message);
+        return { success: false, error: error.message };
     }
 }
 
@@ -7173,15 +7406,19 @@ function handleCancelJob(e) {
     }
 
     // Remove from current jobs
-    currentJobs = currentJobs.filter(job => job.jobNumber !== selectedJob.jobNumber);
+    removeJobFromQueue(selectedJob.jobNumber);
 
     // Clear active job tracking if this was the active job
-    if (activeJobNumber === selectedJob.jobNumber) {
+    if (normalizeJobNumber(activeJobNumber) === normalizeJobNumber(selectedJob.jobNumber)) {
         activeJobNumber = null;
         activeJobState = null;
-        
+
         // Re-enable PO input after job is cancelled
         updatePOInputState();
+    }
+
+    if (typeof LiveTracking !== 'undefined') {
+        LiveTracking.jobUnload();
     }
 
     // Don't reset timers - they should persist until shift change
@@ -7208,8 +7445,9 @@ function handleCancelJob(e) {
     
     // Save updated state to localStorage
     saveStateToStorage();
+    updateClockButtonUI();
 
-    alert(`Job ${data.jobNumber} has been cancelled.\n\nReason: ${data.cancelReason}`);
+    alert(`Job ${data.jobNumber} has been cancelled.\n\nReason: ${cancelReason}`);
 
     console.log('Job cancelled:', data);
 }

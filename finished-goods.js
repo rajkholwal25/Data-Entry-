@@ -6,6 +6,7 @@ const API_BASE_URL = `${window.location.protocol}//${window.location.host}/api`;
 
 // Current job data
 let currentJobData = null;
+let currentInventoryUOM = '';
 
 // Last submitted entry data (for label printing)
 let lastSubmittedEntry = null;
@@ -112,6 +113,7 @@ function initializeElements() {
     elements.labelPreviewBrowserPrintBtn = document.getElementById('label-preview-browser-print-btn');
     elements.labelPreviewPrintBtn = document.getElementById('label-preview-print-btn');
     elements.labelPrintStatusExtra = document.getElementById('label-print-status-extra');
+    elements.previewSlipBtn = document.getElementById('preview-slip-btn');
 }
 
 // Setup event listeners
@@ -142,6 +144,10 @@ function setupEventListeners() {
     // Clear form button
     if (elements.clearFormBtn) {
         elements.clearFormBtn.addEventListener('click', clearForm);
+    }
+
+    if (elements.previewSlipBtn) {
+        elements.previewSlipBtn.addEventListener('click', handlePreviewPackingSlip);
     }
     
     // QC Supervisor "Other" option
@@ -237,7 +243,7 @@ async function handleSearch() {
     showSection('loading');
     
     try {
-        const response = await fetch(`${API_BASE_URL}/production-order/${poNumber}`);
+        const response = await fetch(`${API_BASE_URL}/production-order/${poNumber}?enrich=1`);
         const result = await response.json();
         
         if (!response.ok) {
@@ -269,33 +275,68 @@ async function handleSearch() {
     }
 }
 
+function formatQty(qty) {
+    return (Number(qty) || 0).toLocaleString();
+}
+
+function applyInventoryUomToFgUi(uom) {
+    currentInventoryUOM = (uom || '').toString().trim();
+    const unitLabel = currentInventoryUOM || 'Units';
+    const unitSuffix = currentInventoryUOM ? ` (${currentInventoryUOM})` : '';
+
+    const fgQtyLabel = document.getElementById('fg-quantity-label');
+    const fgQtyHint = document.getElementById('fg-quantity-hint');
+    if (fgQtyLabel) {
+        fgQtyLabel.innerHTML = `<span class="label-icon">📦</span> FG Quantity (${unitLabel}) *`;
+    }
+    if (fgQtyHint) {
+        fgQtyHint.textContent = currentInventoryUOM
+            ? `Enter quantity in ${currentInventoryUOM} (same as planned)`
+            : 'Enter quantity in the same unit as planned';
+    }
+
+    const qtyLabels = [
+        ['planned-quantity-label', 'Planned Quantity'],
+        ['issued-quantity-label', 'Issued Quantity'],
+        ['completed-quantity-label', 'Completed Quantity'],
+        ['remaining-quantity-label', 'Remaining Quantity']
+    ];
+    for (const [id, base] of qtyLabels) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = `${base}${unitSuffix}`;
+    }
+}
+
 // Display job details
 function displayJobDetails(job) {
     // Update job info elements
     const jobNumberEl = document.getElementById('job-number');
     const customerNameEl = document.getElementById('customer-name');
-    const itemCodeEl = document.getElementById('item-code');
+    const fgCodeEl = document.getElementById('fg-code');
     const productDescEl = document.getElementById('product-description');
     const plannedQtyEl = document.getElementById('planned-quantity');
     const issuedQtyEl = document.getElementById('issued-quantity');
     const completedQtyEl = document.getElementById('completed-quantity');
     const remainingQtyEl = document.getElementById('remaining-quantity');
     const processCodeEl = document.getElementById('process-code');
+
+    applyInventoryUomToFgUi(job.inventoryUOM);
     
     if (jobNumberEl) jobNumberEl.textContent = job.jobNumber || '-';
-    if (customerNameEl) customerNameEl.textContent = job.customerName || '-';
-    if (itemCodeEl) itemCodeEl.textContent = job.itemNo || '-';
+    const customerDisplay = (job.customerName || job.customerCode || '').toString().trim();
+    if (customerNameEl) customerNameEl.textContent = customerDisplay || '-';
+    if (fgCodeEl) fgCodeEl.textContent = job.itemNo || '-';
     if (productDescEl) productDescEl.textContent = job.jobName || '-';
-    if (plannedQtyEl) plannedQtyEl.textContent = (job.plannedQuantity || 0).toLocaleString();
-    if (issuedQtyEl) issuedQtyEl.textContent = (job.issuedQuantity || 0).toLocaleString();
-    if (completedQtyEl) completedQtyEl.textContent = (job.completedQuantity || 0).toLocaleString();
+    if (plannedQtyEl) plannedQtyEl.textContent = formatQty(job.plannedQuantity);
+    if (issuedQtyEl) issuedQtyEl.textContent = formatQty(job.issuedQuantity);
+    if (completedQtyEl) completedQtyEl.textContent = formatQty(job.completedQuantity);
     
-    // Calculate remaining quantity based on issued - completed (same as data-entry)
+    // Remaining = issued − already done (not planned − done)
     const issuedQty = job.issuedQuantity || 0;
     const completedQty = job.completedQuantity || 0;
-    const remaining = issuedQty > 0 ? (issuedQty - completedQty) : (job.plannedQuantity || 0) - completedQty;
+    const remaining = Math.max(0, issuedQty - completedQty);
     if (remainingQtyEl) {
-        remainingQtyEl.textContent = remaining.toLocaleString();
+        remainingQtyEl.textContent = formatQty(remaining);
         // Show warning color if remaining is low or zero
         if (remaining <= 0) {
             remainingQtyEl.style.color = '#ef4444'; // Red
@@ -350,7 +391,6 @@ function handleFormSubmit(e) {
 // Get form data
 function getFormData() {
     const fgQuantity = parseInt(document.getElementById('fg-quantity')?.value) || 0;
-    const packingDetails = parseInt(document.getElementById('packing-details')?.value) || 0;
     const remarks = document.getElementById('remarks')?.value.trim() || '';
     const pkdDetails = document.getElementById('pkd-details')?.value.trim() || '';
     
@@ -362,7 +402,6 @@ function getFormData() {
     
     return {
         fgQuantity,
-        packingDetails,
         qcSupervisor,
         operatorName: document.getElementById('operator-name')?.value.trim() || '',
         remarks,
@@ -373,11 +412,8 @@ function getFormData() {
 // Validate form data
 function validateFormData(data) {
     if (!data.fgQuantity || data.fgQuantity <= 0) {
-        return { valid: false, message: 'Please enter a valid FG Quantity' };
-    }
-    
-    if (!data.packingDetails || data.packingDetails <= 0) {
-        return { valid: false, message: 'Please enter valid Packing Detail (Cartons/CFC)' };
+        const uomHint = currentInventoryUOM ? ` (${currentInventoryUOM})` : '';
+        return { valid: false, message: `Please enter a valid FG Quantity${uomHint}` };
     }
     
     if (!data.qcSupervisor) {
@@ -395,8 +431,7 @@ function validateFormData(data) {
         const completedQty = currentJobData.completedQuantity || 0;
         const plannedQty = currentJobData.plannedQuantity || 0;
         
-        // Calculate remaining based on issued quantity (if available) or planned quantity
-        const remainingQty = issuedQty > 0 ? (issuedQty - completedQty) : (plannedQty - completedQty);
+        const remainingQty = Math.max(0, issuedQty - completedQty);
         
         console.log(`📊 FG Quantity Validation:`);
         console.log(`   Issued Qty: ${issuedQty}`);
@@ -445,7 +480,7 @@ function showConfirmModal(formData) {
             <span class="confirm-value highlight">${currentJobData?.jobNumber || '-'}</span>
         </div>
         <div class="confirm-item">
-            <span class="confirm-label">Item Code</span>
+            <span class="confirm-label">FG Code</span>
             <span class="confirm-value">${currentJobData?.itemNo || '-'}</span>
         </div>
         <div class="confirm-item">
@@ -453,12 +488,8 @@ function showConfirmModal(formData) {
             <span class="confirm-value">${currentJobData?.jobName || '-'}</span>
         </div>
         <div class="confirm-item">
-            <span class="confirm-label">FG Quantity</span>
-            <span class="confirm-value highlight">${formData.fgQuantity.toLocaleString()}</span>
-        </div>
-        <div class="confirm-item">
-            <span class="confirm-label">Packing Detail (Cartons/CFC)</span>
-            <span class="confirm-value">${formData.packingDetails}</span>
+            <span class="confirm-label">FG Quantity${currentInventoryUOM ? ` (${currentInventoryUOM})` : ''}</span>
+            <span class="confirm-value highlight">${formatQty(formData.fgQuantity)}</span>
         </div>
         <div class="confirm-item">
             <span class="confirm-label">QC Supervisor</span>
@@ -519,7 +550,7 @@ async function confirmAndSubmit() {
             plannedQuantity: currentJobData?.plannedQuantity || 0,
             completedQuantity: currentJobData?.completedQuantity || 0,
             fgQuantity: formData.fgQuantity,
-            packingDetails: formData.packingDetails,
+            inventoryUOM: currentInventoryUOM || currentJobData?.inventoryUOM || '',
             qcSupervisor: formData.qcSupervisor,
             operatorName: formData.operatorName,
             remarks: formData.remarks,
@@ -563,10 +594,8 @@ async function confirmAndSubmit() {
 
 // Show success message
 function showSuccess(payload, result) {
-    // Calculate number of labels: ceil(fgQuantity / packingDetails)
-    const numLabels = result.labelsCount || Math.ceil(payload.fgQuantity / payload.packingDetails);
-    
-    // Store entry data for label printing (for manual reprint if needed)
+    const numLabels = result.labelsCount || 1;
+
     lastSubmittedEntry = {
         customerName: currentJobData?.customerName || '',
         customerCode: currentJobData?.customerCode || '',
@@ -574,12 +603,13 @@ function showSuccess(payload, result) {
         fgCode: currentJobData?.itemNo || '',
         itemCodeLabel: currentJobData?.itemCodeLabel || '',
         jobNo: payload.jobNo,
-        quantity: payload.packingDetails,
+        quantity: payload.fgQuantity,
         totalQuantity: payload.fgQuantity,
+        inventoryUOM: payload.inventoryUOM || currentInventoryUOM || 'KGS',
         packedOn: formatDateForLabel(new Date()),
         operator: formatLabelOperatorField(payload.qcSupervisor, payload.operatorName),
         batchNo: result.batchNumber || '',
-        numLabels: numLabels
+        numLabels
     };
     
     // Determine print status
@@ -616,14 +646,13 @@ function showSuccess(payload, result) {
     if (elements.successDetails) {
         elements.successDetails.innerHTML = `
             <div><strong>PO Number:</strong> ${payload.poNumber}</div>
-            <div><strong>FG Quantity:</strong> ${payload.fgQuantity.toLocaleString()}</div>
-            <div><strong>Packing Detail (Cartons/CFC):</strong> ${payload.packingDetails}</div>
+            <div><strong>FG Quantity${currentInventoryUOM ? ` (${currentInventoryUOM})` : ''}:</strong> ${formatQty(payload.fgQuantity)}</div>
             <div><strong>QC Supervisor:</strong> ${payload.qcSupervisor}</div>
             <div><strong>Operator:</strong> ${payload.operatorName}</div>
             ${result.batchNumber ? `<div><strong>Batch Number:</strong> ${result.batchNumber}</div>` : ''}
             ${result.sapDocEntry ? `<div><strong>SAP Doc Entry:</strong> ${result.sapDocEntry}</div>` : ''}
             ${sapStatusHTML}
-            <div><strong>Labels Count:</strong> ${numLabels}</div>
+            <div><strong>Packing Slip:</strong> 1 label (${formatQty(payload.fgQuantity)}${currentInventoryUOM ? ` ${currentInventoryUOM}` : ''})</div>
             ${printStatusHTML}
         `;
     }
@@ -661,15 +690,89 @@ function showLabelPreviewModal() {
     const n = lastSubmittedEntry.numLabels;
     if (elements.labelPreviewHint) {
         elements.labelPreviewHint.textContent =
-            `Showing label 1 of ${n}. The Zebra will print ${n} label(s) with the same layout (box numbers 1…${n}).`;
+            `Packing slip preview — total FG quantity in ${lastSubmittedEntry.inventoryUOM || 'KGS'}.`;
     }
     if (elements.labelPreviewHost) {
-        elements.labelPreviewHost.innerHTML = generateLabelHTML(lastSubmittedEntry, 1, n);
+        elements.labelPreviewHost.innerHTML =
+            `<div class="label-preview-scale">${generateLabelHTML(lastSubmittedEntry, 1, n)}</div>`;
     }
     if (elements.labelPreviewPrintBtn) {
         elements.labelPreviewPrintBtn.disabled = false;
     }
     elements.labelPreviewModal.style.display = 'flex';
+}
+
+async function fetchLastBatchForPo(poNumber) {
+    if (!poNumber) return '';
+    try {
+        const response = await fetch(`${API_BASE_URL}/fg-last-batch/${encodeURIComponent(poNumber)}`);
+        if (!response.ok) return '';
+        const json = await response.json();
+        return (json.batchNumber || '').toString().trim();
+    } catch {
+        return '';
+    }
+}
+
+async function buildLabelDataFromCurrentForm(batchNo = '') {
+    const formData = getFormData();
+    const uom = currentInventoryUOM || currentJobData?.inventoryUOM || 'KGS';
+    return {
+        customerName: currentJobData?.customerName || '',
+        customerCode: currentJobData?.customerCode || '',
+        itemDescription: currentJobData?.jobName || '',
+        fgCode: currentJobData?.itemNo || '',
+        itemCodeLabel: currentJobData?.itemCodeLabel || '',
+        jobNo: currentJobData?.jobNo || currentJobData?.jobNumber || '',
+        quantity: formData.fgQuantity,
+        totalQuantity: formData.fgQuantity,
+        inventoryUOM: uom,
+        packedOn: formatDateForLabel(new Date()),
+        operator: formatLabelOperatorField(formData.qcSupervisor, formData.operatorName),
+        batchNo: batchNo || ''
+    };
+}
+
+/** Preview / reprint packing slip without re-submitting to SAP. */
+async function handlePreviewPackingSlip() {
+    if (!currentJobData?.jobNumber) {
+        alert('Please search a production order first.');
+        return;
+    }
+
+    const formData = getFormData();
+    if (!formData.fgQuantity || formData.fgQuantity <= 0) {
+        alert('Please enter FG Quantity first.');
+        return;
+    }
+    if (!formData.qcSupervisor) {
+        alert('Please select QC Supervisor (shown on label).');
+        return;
+    }
+    if (!formData.operatorName) {
+        alert('Please enter Operator name (shown on label).');
+        return;
+    }
+
+    const batchNo = await fetchLastBatchForPo(currentJobData.jobNumber);
+    const labelData = await buildLabelDataFromCurrentForm(batchNo);
+    lastSubmittedEntry = {
+        ...labelData,
+        numLabels: 1
+    };
+
+    showLabelPreviewModal();
+}
+
+function getLabelQuantityLabel(data) {
+    const uom = (data?.inventoryUOM || data?.uom || currentInventoryUOM || 'KGS').toString().trim();
+    return uom ? `Quantity (${uom})` : 'Quantity';
+}
+
+function getLabelQuantityValue(data) {
+    const qty = Number(data?.quantity ?? data?.totalQuantity ?? data?.fgQuantity);
+    if (!Number.isFinite(qty) || qty <= 0) return '';
+    return qty.toLocaleString();
 }
 
 function buildLabelDataForZebra() {
@@ -682,6 +785,8 @@ function buildLabelDataForZebra() {
         itemCodeLabel: lastSubmittedEntry.itemCodeLabel,
         jobNo: lastSubmittedEntry.jobNo,
         quantity: lastSubmittedEntry.quantity,
+        totalQuantity: lastSubmittedEntry.totalQuantity,
+        inventoryUOM: lastSubmittedEntry.inventoryUOM,
         packedOn: lastSubmittedEntry.packedOn,
         operator: lastSubmittedEntry.operator,
         batchNo: lastSubmittedEntry.batchNo
@@ -879,10 +984,18 @@ function printLabelsOnThisDevice() {
     }
 }
 
+function extractBarcodeDisplay(data) {
+    const itemCodeLabelRaw = (data?.itemCodeLabel || '').toString().trim();
+    const fromLabel = itemCodeLabelRaw.split(',')[0].trim().toUpperCase().replace(/[^0-9A-Z \-\.\$\/\+%]/g, '');
+    const fgCode = (data?.fgCode || '').toString().trim();
+    const barcodeValue = fromLabel || fgCode.toUpperCase().replace(/[^0-9A-Z \-\.\$\/\+%]/g, '');
+    const displayText = itemCodeLabelRaw || fgCode;
+    return { barcodeValue, displayText };
+}
+
 // Generate HTML for a single label (150mm x 100mm for Zebra ZT411 - Landscape)
 function generateLabelHTML(data, boxNum, totalBoxes) {
-    const itemCodeLabelRaw = (data.itemCodeLabel || '').toString().trim();
-    const barcodeValue = itemCodeLabelRaw.split(',')[0].trim().toUpperCase().replace(/[^0-9A-Z \-\.\$\/\+%]/g, '');
+    const { barcodeValue, displayText } = extractBarcodeDisplay(data);
     const barcodeSvg = barcodeValue ? renderCode39Svg(barcodeValue) : '';
 
     return `
@@ -891,11 +1004,11 @@ function generateLabelHTML(data, boxNum, totalBoxes) {
             <div class="sap-label">
               <div class="sap-top">
                 <div class="sap-logo">
-                  <img src="vk-logo.png" alt="VK logo">
+                  <img src="/vk-logo.png" alt="VK logo">
                 </div>
                 <div class="sap-company">
                   <strong>VK GLOBAL DIGITAL PRIVATE LIMITED</strong>
-                  PLOT NO. 928,SECTOR-68, IMT FARIDABAD,<br/>
+                  PLOT NO. 928, SECTOR-68, IMT FARIDABAD,<br/>
                   FARIDABAD - 121004, INDIA
                 </div>
               </div>
@@ -903,7 +1016,7 @@ function generateLabelHTML(data, boxNum, totalBoxes) {
               <div class="sap-title">PACKING SLIP</div>
 
               <div class="sap-fields">
-                <table class="sap-table">
+                <table class="sap-table sap-fields-table">
                   <tr>
                     <td class="k">Customer Name</td>
                     <td class="v">${escapeHtml(data.customerName)}</td>
@@ -915,13 +1028,19 @@ function generateLabelHTML(data, boxNum, totalBoxes) {
                 </table>
 
                 <table class="sap-table sap-details-grid">
+                  <colgroup>
+                    <col class="col-k">
+                    <col class="col-v">
+                    <col class="col-rk">
+                    <col class="col-rv">
+                  </colgroup>
                   <tr>
                     <td class="k">FG Code</td><td class="v">${escapeHtml(data.fgCode)}</td>
                     <td class="barcode-cell" colspan="2" rowspan="3">
                       <div class="sap-barcode-title">ItemCode</div>
                       <div class="sap-barcode">
                         ${barcodeSvg}
-                        <div class="code-text">${escapeHtml(itemCodeLabelRaw)}</div>
+                        <div class="code-text">${escapeHtml(displayText)}</div>
                       </div>
                     </td>
                   </tr>
@@ -929,15 +1048,14 @@ function generateLabelHTML(data, boxNum, totalBoxes) {
                     <td class="k">Job No</td><td class="v">${escapeHtml(data.jobNo)}</td>
                   </tr>
                   <tr>
-                    <td class="k">Quantity</td><td class="v">${escapeHtml(String(data.quantity ?? ''))}</td>
+                    <td class="k">${escapeHtml(getLabelQuantityLabel(data))}</td><td class="v">${escapeHtml(getLabelQuantityValue(data))}</td>
                   </tr>
                   <tr>
                     <td class="k">Packed On</td><td class="v">${escapeHtml(data.packedOn)}</td>
-                    <td class="rk">Box No</td><td class="rv">${boxNum}/${totalBoxes}</td>
+                    <td class="rk">Batch No</td><td class="rv">${escapeHtml(data.batchNo)}</td>
                   </tr>
                   <tr>
-                    <td class="k">Operator</td><td class="v">${escapeHtml(data.operator)}</td>
-                    <td class="rk">Batch No</td><td class="rv">${escapeHtml(data.batchNo)}</td>
+                    <td class="k">Operator</td><td class="v" colspan="3">${escapeHtml(data.operator)}</td>
                   </tr>
                 </table>
               </div>

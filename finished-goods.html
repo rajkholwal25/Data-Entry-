@@ -7,8 +7,8 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <title>VK Global Digital - Finished Goods Entry</title>
-    <meta name="description" content="VK Global Digital - Finished Goods data entry and QC approval">
+    <title>Unit 1 - Finished Goods Entry</title>
+    <meta name="description" content="Unit 1 Finished Goods data entry, QC approval, report completion and label printing">
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect fill='%2310b981' width='100' height='100' rx='20'/%3E%3Ctext x='50' y='65' font-family='Arial' font-size='45' font-weight='bold' fill='white' text-anchor='middle'%3EFG%3C/text%3E%3C/svg%3E">
     <link rel="stylesheet" href="finished-goods.css">
 </head>
@@ -84,27 +84,27 @@
                         <span class="detail-value highlight" id="customer-name">-</span>
                     </div>
                     <div class="detail-item">
-                        <span class="detail-label">Item Code</span>
-                        <span class="detail-value" id="item-code">-</span>
+                        <span class="detail-label">FG Code</span>
+                        <span class="detail-value" id="fg-code">-</span>
                     </div>
                     <div class="detail-item">
                         <span class="detail-label">Product Description</span>
                         <span class="detail-value" id="product-description">-</span>
                     </div>
                     <div class="detail-item">
-                        <span class="detail-label">Planned Quantity</span>
+                        <span class="detail-label" id="planned-quantity-label">Planned Quantity</span>
                         <span class="detail-value" id="planned-quantity">-</span>
                     </div>
                     <div class="detail-item">
-                        <span class="detail-label">Issued Quantity</span>
+                        <span class="detail-label" id="issued-quantity-label">Issued Quantity</span>
                         <span class="detail-value highlight" id="issued-quantity">-</span>
                     </div>
                     <div class="detail-item">
-                        <span class="detail-label">Completed Quantity</span>
+                        <span class="detail-label" id="completed-quantity-label">Completed Quantity</span>
                         <span class="detail-value" id="completed-quantity">-</span>
                     </div>
                     <div class="detail-item">
-                        <span class="detail-label">Remaining Quantity</span>
+                        <span class="detail-label" id="remaining-quantity-label">Remaining Quantity</span>
                         <span class="detail-value highlight-warning" id="remaining-quantity">-</span>
                     </div>
                     <div class="detail-item">
@@ -123,24 +123,13 @@
                 <form id="fg-entry-form" class="fg-form">
                     <!-- FG Quantity -->
                     <div class="form-group">
-                        <label for="fg-quantity" class="form-label">
+                        <label for="fg-quantity" class="form-label" id="fg-quantity-label">
                             <span class="label-icon">📦</span>
-                            FG Quantity (Cartons) *
+                            FG Quantity *
                         </label>
                         <input type="number" id="fg-quantity" name="fgQuantity" class="form-input" 
                             placeholder="Enter finished goods quantity" min="1" required>
-                        <span class="input-hint">Number of finished cartons/units</span>
-                    </div>
-
-                    <!-- Packing Details -->
-                    <div class="form-group">
-                        <label for="packing-details" class="form-label">
-                            <span class="label-icon">📋</span>
-                            Packing Detail (Cartons/CFC) *
-                        </label>
-                        <input type="number" id="packing-details" name="packingDetails" class="form-input" 
-                            placeholder="Enter packing detail" min="1" required>
-                        <span class="input-hint">Number of Cartons/CFC</span>
+                        <span class="input-hint" id="fg-quantity-hint">Same unit as planned quantity (from SAP)</span>
                     </div>
 
                     <!-- QC Supervisor Selection -->
@@ -204,6 +193,9 @@
                     <div class="form-actions">
                         <button type="button" class="btn btn-secondary" id="clear-form-btn">
                             <span>🔄</span> Clear Form
+                        </button>
+                        <button type="button" class="btn btn-secondary" id="preview-slip-btn">
+                            <span>🖨️</span> Preview Packing Slip
                         </button>
                         <button type="submit" class="btn btn-primary" id="submit-btn">
                             <span>✅</span> Submit FG Entry

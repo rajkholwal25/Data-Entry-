@@ -1,39 +1,6 @@
-// Enhanced interactivity for the Post Press Dashboard
-
-const BRANCH_STORAGE_KEY = 'selectedBranch';
-
-function switchBranch(branch) {
-    const unit1 = document.getElementById('unit-1-machines');
-    const unit2 = document.getElementById('unit-2-machines');
-    const subtitle = document.querySelector('.subtitle');
-
-    if (!unit1 || !unit2) return;
-
-    const isUnit1 = branch === 'unit-1';
-    unit1.hidden = !isUnit1;
-    unit2.hidden = isUnit1;
-
-    if (subtitle) {
-        subtitle.textContent = isUnit1
-            ? 'Select a holographic process and machine to enter production data'
-            : 'Select a process and machine to enter production data';
-    }
-
-    localStorage.setItem(BRANCH_STORAGE_KEY, branch);
-}
+// Enhanced interactivity for the Unit 1 (Holographic) Dashboard
 
 document.addEventListener('DOMContentLoaded', function() {
-    const branchSelect = document.getElementById('branch-select');
-    const savedBranch = localStorage.getItem(BRANCH_STORAGE_KEY) || 'unit-2';
-
-    if (branchSelect) {
-        branchSelect.value = savedBranch;
-        switchBranch(savedBranch);
-        branchSelect.addEventListener('change', function() {
-            switchBranch(this.value);
-        });
-    }
-
     // Add ripple effect to machine items
     const machineItems = document.querySelectorAll('.machine-item');
     
