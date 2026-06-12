@@ -11,6 +11,10 @@ let currentInventoryUOM = '';
 // Last submitted entry data (for label printing)
 let lastSubmittedEntry = null;
 
+// Previous-process inputs for FG traceability (same pattern as machine report completion)
+let fgInputRoles = [];
+let fgSelectedInputs = [];
+
 // QC Supervisor list
 const QC_SUPERVISORS = [
     'Amit',
@@ -149,6 +153,8 @@ function setupEventListeners() {
     if (elements.previewSlipBtn) {
         elements.previewSlipBtn.addEventListener('click', handlePreviewPackingSlip);
     }
+
+    document.getElementById('fg-input-add-btn')?.addEventListener('click', addFgInputFromSelect);
     
     // QC Supervisor "Other" option
     if (elements.qcSupervisorSelect) {
@@ -291,8 +297,15 @@ function applyInventoryUomToFgUi(uom) {
     }
     if (fgQtyHint) {
         fgQtyHint.textContent = currentInventoryUOM
-            ? `Enter quantity in ${currentInventoryUOM} (same as planned)`
-            : 'Enter quantity in the same unit as planned';
+            ? `Auto total of inputs used (${currentInventoryUOM}) — posted to SAP`
+            : 'Auto total of inputs used — posted to SAP';
+    }
+
+    const fgInputsHint = document.getElementById('fg-inputs-hint');
+    if (fgInputsHint) {
+        fgInputsHint.textContent = currentInventoryUOM
+            ? `Select last-process batches issued to this PO; enter qty used in ${currentInventoryUOM}`
+            : 'Select last-process batches issued to this PO; enter qty used';
     }
 
     const qtyLabels = [
@@ -346,6 +359,153 @@ function displayJobDetails(job) {
     }
     
     if (processCodeEl) processCodeEl.textContent = job.uPCode || '-';
+
+    fgSelectedInputs = [];
+    loadFgInputBatches(job);
+}
+
+function formatKgsDisplay(n) {
+    const v = Number(n) || 0;
+    return Math.abs(v - Math.round(v)) < 0.001 ? String(Math.round(v)) : v.toFixed(2);
+}
+
+async function loadFgInputBatches(job) {
+    const po = String(job?.jobNumber || '').trim();
+    if (!po) {
+        fgInputRoles = [];
+        renderFgSelectedInputs();
+        return;
+    }
+    const fg = job?.itemNo || '';
+    const qs = new URLSearchParams({ process_tag: 'FG' });
+    if (fg) qs.set('fg_num', fg);
+    try {
+        const res = await fetch(`${API_BASE_URL}/po/${encodeURIComponent(po)}/process-inputs?${qs}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const roles = (data.success && Array.isArray(data.roles)) ? data.roles : [];
+        const byBatch = new Map();
+        for (const r of roles) {
+            const key = String(r.batch_number || r.issue_id || '');
+            if (!key) continue;
+            if (!byBatch.has(key)) {
+                byBatch.set(key, { ...r, issue_id: r.issue_id ?? r.batch_number });
+            }
+        }
+        fgInputRoles = Array.from(byBatch.values());
+        console.log(`📋 FG inputs loaded: ${fgInputRoles.length} batch(es) for PO ${po}`);
+    } catch (e) {
+        console.warn('Failed to load FG process inputs:', e);
+        fgInputRoles = [];
+    }
+    renderFgSelectedInputs();
+}
+
+function populateFgInputDropdown() {
+    const sel = document.getElementById('fg-input-add-select');
+    if (!sel) return;
+    const selectedKeys = new Set(fgSelectedInputs.map((r) => String(r.issue_id)));
+    sel.innerHTML = '<option value="">— Select input batch —</option>';
+    let added = 0;
+    for (const r of fgInputRoles) {
+        if ((Number(r.remaining_qty) || 0) <= 0) continue;
+        if (selectedKeys.has(String(r.issue_id))) continue;
+        const opt = document.createElement('option');
+        opt.value = String(r.issue_id);
+        opt.textContent = `${r.batch_number} — avail ${formatKgsDisplay(r.remaining_qty)}${currentInventoryUOM ? ` ${currentInventoryUOM}` : ' KGS'}`;
+        sel.appendChild(opt);
+        added++;
+    }
+    if (added === 0) {
+        const emptyOpt = document.createElement('option');
+        emptyOpt.value = '';
+        emptyOpt.textContent = fgInputRoles.length
+            ? 'All inputs fully used'
+            : 'No batches from last process — issue material to this FG PO first';
+        emptyOpt.disabled = true;
+        sel.appendChild(emptyOpt);
+    }
+}
+
+function updateFgQuantityFromInputs() {
+    const total = fgSelectedInputs.reduce((s, r) => s + (Number(r.quantity_used) || 0), 0);
+    const fgQtyEl = document.getElementById('fg-quantity');
+    if (fgQtyEl) {
+        fgQtyEl.value = total > 0 ? (Math.abs(total - Math.round(total)) < 0.001 ? String(Math.round(total)) : total.toFixed(2)) : '';
+    }
+}
+
+function renderFgSelectedInputs() {
+    const list = document.getElementById('fg-input-selected-list');
+    if (!list) return;
+    list.innerHTML = '';
+    fgSelectedInputs.forEach((r) => {
+        const row = document.createElement('div');
+        row.className = 'role-selected-row';
+        row.innerHTML = `
+            <span class="role-batch-label">${r.batch_number}</span>
+            <span class="role-avail">Avail: ${formatKgsDisplay(r.remaining_qty)}${currentInventoryUOM ? ` ${currentInventoryUOM}` : ' KGS'}</span>
+            <span class="role-used-label">Used</span>
+            <input type="number" class="fg-input-qty" min="0" max="${r.remaining_qty}" step="any"
+                value="${r.quantity_used > 0 ? r.quantity_used : ''}" placeholder="0">
+            <span class="role-qty-unit">${currentInventoryUOM || 'KGS'}</span>
+            <button type="button" class="role-remove-btn">Remove</button>
+        `;
+        const qtyInput = row.querySelector('.fg-input-qty');
+        qtyInput.addEventListener('input', () => {
+            let val = parseFloat(qtyInput.value) || 0;
+            if (val > r.remaining_qty) {
+                val = r.remaining_qty;
+                qtyInput.value = String(val);
+            }
+            if (val < 0) val = 0;
+            r.quantity_used = val;
+            updateFgQuantityFromInputs();
+        });
+        row.querySelector('.role-remove-btn')?.addEventListener('click', () => {
+            fgSelectedInputs = fgSelectedInputs.filter((x) => String(x.issue_id) !== String(r.issue_id));
+            renderFgSelectedInputs();
+        });
+        list.appendChild(row);
+    });
+    populateFgInputDropdown();
+    updateFgQuantityFromInputs();
+}
+
+function addFgInputFromSelect() {
+    const sel = document.getElementById('fg-input-add-select');
+    if (!sel || !sel.value) {
+        alert('Please select an input batch to add');
+        return;
+    }
+    const key = sel.value;
+    const role = fgInputRoles.find((r) => String(r.issue_id) === key);
+    if (!role || (Number(role.remaining_qty) || 0) <= 0) {
+        alert('This batch has no remaining quantity');
+        return;
+    }
+    if (fgSelectedInputs.some((r) => String(r.issue_id) === key)) return;
+    fgSelectedInputs.push({
+        issue_id: role.issue_id,
+        batch_number: role.batch_number,
+        item_code: role.item_code,
+        input_type: role.input_type || 'process_batch',
+        remaining_qty: role.remaining_qty,
+        quantity_used: 0
+    });
+    renderFgSelectedInputs();
+}
+
+function collectFgInputUsages() {
+    return fgSelectedInputs
+        .filter((r) => (Number(r.quantity_used) || 0) > 0)
+        .map((r) => ({
+            issue_id: r.input_type === 'process_batch' ? null : r.issue_id,
+            batch_number: r.batch_number,
+            item_code: r.item_code,
+            input_type: r.input_type || 'process_batch',
+            quantity_used: Number(r.quantity_used) || 0
+        }));
 }
 
 // Handle QC Supervisor dropdown change
@@ -390,7 +550,8 @@ function handleFormSubmit(e) {
 
 // Get form data
 function getFormData() {
-    const fgQuantity = parseInt(document.getElementById('fg-quantity')?.value) || 0;
+    const fgQuantity = parseFloat(document.getElementById('fg-quantity')?.value) || 0;
+    const roleUsages = collectFgInputUsages();
     const remarks = document.getElementById('remarks')?.value.trim() || '';
     const pkdDetails = document.getElementById('pkd-details')?.value.trim() || '';
     
@@ -402,6 +563,7 @@ function getFormData() {
     
     return {
         fgQuantity,
+        roleUsages,
         qcSupervisor,
         operatorName: document.getElementById('operator-name')?.value.trim() || '',
         remarks,
@@ -411,9 +573,17 @@ function getFormData() {
 
 // Validate form data
 function validateFormData(data) {
+    if (!data.roleUsages || data.roleUsages.length === 0) {
+        return { valid: false, message: 'Please add at least one input batch from the last process and enter quantity used' };
+    }
+    for (const r of data.roleUsages) {
+        if ((Number(r.quantity_used) || 0) <= 0) {
+            return { valid: false, message: `Enter quantity used for ${r.batch_number}` };
+        }
+    }
     if (!data.fgQuantity || data.fgQuantity <= 0) {
         const uomHint = currentInventoryUOM ? ` (${currentInventoryUOM})` : '';
-        return { valid: false, message: `Please enter a valid FG Quantity${uomHint}` };
+        return { valid: false, message: `FG quantity must be greater than zero${uomHint}` };
     }
     
     if (!data.qcSupervisor) {
@@ -488,6 +658,10 @@ function showConfirmModal(formData) {
             <span class="confirm-value">${currentJobData?.jobName || '-'}</span>
         </div>
         <div class="confirm-item">
+            <span class="confirm-label">Inputs Used</span>
+            <span class="confirm-value">${(formData.roleUsages || []).map((r) => `${r.batch_number}: ${formatKgsDisplay(r.quantity_used)}`).join('<br>')}</span>
+        </div>
+        <div class="confirm-item">
             <span class="confirm-label">FG Quantity${currentInventoryUOM ? ` (${currentInventoryUOM})` : ''}</span>
             <span class="confirm-value highlight">${formatQty(formData.fgQuantity)}</span>
         </div>
@@ -550,6 +724,7 @@ async function confirmAndSubmit() {
             plannedQuantity: currentJobData?.plannedQuantity || 0,
             completedQuantity: currentJobData?.completedQuantity || 0,
             fgQuantity: formData.fgQuantity,
+            role_usages: formData.roleUsages,
             inventoryUOM: currentInventoryUOM || currentJobData?.inventoryUOM || '',
             qcSupervisor: formData.qcSupervisor,
             operatorName: formData.operatorName,
@@ -1192,7 +1367,9 @@ function clearForm() {
     if (elements.fgEntryForm) {
         elements.fgEntryForm.reset();
     }
-    
+    fgSelectedInputs = [];
+    renderFgSelectedInputs();
+
     // Reset QC supervisor "other" field
     if (elements.otherQcGroup) {
         elements.otherQcGroup.style.display = 'none';

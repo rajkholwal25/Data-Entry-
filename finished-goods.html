@@ -121,15 +121,33 @@
                     <h2>Finished Goods Details</h2>
                 </div>
                 <form id="fg-entry-form" class="fg-form">
-                    <!-- FG Quantity -->
+                    <!-- Inputs from previous process (like report completion on machines) -->
+                    <div class="form-group">
+                        <label class="form-label" id="fg-inputs-label">
+                            <span class="label-icon">📥</span>
+                            Inputs from Last Process *
+                        </label>
+                        <div id="fg-input-picker" class="role-picker">
+                            <div class="role-picker-add-row">
+                                <select id="fg-input-add-select" class="role-picker-select">
+                                    <option value="">— Select input batch —</option>
+                                </select>
+                                <button type="button" class="btn btn-secondary btn-sm" id="fg-input-add-btn">Add</button>
+                            </div>
+                            <div id="fg-input-selected-list" class="role-selected-list"></div>
+                        </div>
+                        <span class="input-hint" id="fg-inputs-hint">Select batches issued from the previous process; enter qty used (partial OK)</span>
+                    </div>
+
+                    <!-- FG Quantity (auto from inputs) -->
                     <div class="form-group">
                         <label for="fg-quantity" class="form-label" id="fg-quantity-label">
                             <span class="label-icon">📦</span>
                             FG Quantity *
                         </label>
-                        <input type="number" id="fg-quantity" name="fgQuantity" class="form-input" 
-                            placeholder="Enter finished goods quantity" min="1" required>
-                        <span class="input-hint" id="fg-quantity-hint">Same unit as planned quantity (from SAP)</span>
+                        <input type="number" id="fg-quantity" name="fgQuantity" class="form-input form-input-readonly"
+                            placeholder="Auto from inputs used" min="1" step="any" readonly required>
+                        <span class="input-hint" id="fg-quantity-hint">Total of inputs used above (posted to SAP)</span>
                     </div>
 
                     <!-- QC Supervisor Selection -->
@@ -263,7 +281,7 @@
 
     <!-- Rasterize label HTML to PNG on tablet (avoids SVG foreignObject incompatibilities) -->
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
-    <script src="finished-goods.js?v=2026-06-03"></script>
+    <script src="finished-goods.js?v=20260612c"></script>
 </body>
 
 </html>

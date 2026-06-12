@@ -3689,10 +3689,15 @@ body {
 
 .ticket-toast-success {
     border-left-color: var(--accent-green);
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.12), var(--bg-card));
 }
 
 .ticket-toast-error {
     border-left-color: var(--accent-orange);
+}
+
+.ticket-toast-success .ticket-toast-title {
+    color: #34d399;
 }
 
 .ticket-toast-icon {

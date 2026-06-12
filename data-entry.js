@@ -6910,51 +6910,59 @@ ${breakdownData.reason}
     }
 }
 
-// Show success notification for ticket creation
-function showTicketSuccessNotification(ticketId, issueType) {
-    // Create a toast notification
+function showActionToast({ title, message, type = 'success', duration = 5000 }) {
+    const icon = type === 'error' ? '⚠️' : type === 'info' ? '⏳' : '✅';
+    const toastClass = type === 'error' ? 'ticket-toast-error' : 'ticket-toast-success';
     const toast = document.createElement('div');
-    toast.className = 'ticket-toast ticket-toast-success';
+    toast.className = `ticket-toast ${toastClass}`;
     toast.innerHTML = `
-        <div class="ticket-toast-icon">✅</div>
+        <div class="ticket-toast-icon">${icon}</div>
         <div class="ticket-toast-content">
-            <div class="ticket-toast-title">Maintenance Ticket Raised</div>
-            <div class="ticket-toast-message">Ticket ID: ${ticketId}<br>${issueType} breakdown reported</div>
+            <div class="ticket-toast-title">${title}</div>
+            <div class="ticket-toast-message">${message}</div>
         </div>
     `;
-    
     document.body.appendChild(toast);
-    
-    // Animate in
     setTimeout(() => toast.classList.add('show'), 100);
-    
-    // Remove after 5 seconds
     setTimeout(() => {
         toast.classList.remove('show');
         setTimeout(() => toast.remove(), 300);
-    }, 5000);
+    }, duration);
+}
+
+// Show success notification for ticket creation
+function showTicketSuccessNotification(ticketId, issueType) {
+    showActionToast({
+        title: 'Maintenance Ticket Raised',
+        message: `Ticket ID: ${ticketId}<br>${issueType} breakdown reported`
+    });
 }
 
 // Show error notification for ticket creation
 function showTicketErrorNotification(message) {
-    const toast = document.createElement('div');
-    toast.className = 'ticket-toast ticket-toast-error';
-    toast.innerHTML = `
-        <div class="ticket-toast-icon">⚠️</div>
-        <div class="ticket-toast-content">
-            <div class="ticket-toast-title">Ticket Warning</div>
-            <div class="ticket-toast-message">${message}</div>
-        </div>
-    `;
-    
-    document.body.appendChild(toast);
-    
-    setTimeout(() => toast.classList.add('show'), 100);
-    
-    setTimeout(() => {
-        toast.classList.remove('show');
-        setTimeout(() => toast.remove(), 300);
-    }, 5000);
+    showActionToast({
+        title: 'Ticket Warning',
+        message,
+        type: 'error'
+    });
+}
+
+function setFinishSubmitBusy(busy) {
+    const submitBtn = document.getElementById('finish-submit-btn');
+    const previewBtn = document.getElementById('finish-preview-label-btn');
+    const cancelBtn = document.getElementById('finish-cancel-btn');
+    if (submitBtn) {
+        submitBtn.disabled = busy;
+        submitBtn.textContent = busy ? 'Submitting...' : 'Submit';
+    }
+    if (previewBtn) previewBtn.disabled = busy;
+    if (cancelBtn) cancelBtn.disabled = busy;
+    const form = document.getElementById('finish-job-form');
+    if (form) {
+        form.querySelectorAll('input, select, textarea, button').forEach((el) => {
+            if (el.id !== 'finish-submit-btn') el.disabled = busy;
+        });
+    }
 }
 
 // Unit 1 only — legacy Unit 2 machine-type checks (always false)
@@ -7287,6 +7295,7 @@ function getFoldingNumCartons(formData) {
 
 async function handleFinishJob(e) {
     e.preventDefault();
+    if (_jobSubmitInProgress) return;
 
     flushCurrentStateTimeToJob();
 
@@ -7348,8 +7357,8 @@ async function handleFinishJob(e) {
             alert('❌ Please enter Actual Output (KGS)');
             return;
         }
-        if (actualOutput + 1e-6 < roleUsed) {
-            alert('❌ Actual Output cannot be less than total inputs used');
+        if (isEmbossingJob(selectedJob) && actualOutput + 1e-6 < roleUsed) {
+            alert('❌ Actual Output cannot be less than total inputs used (embossing only)');
             return;
         }
         const chemicalUsed = isEmbossingJob(selectedJob) ? Math.max(0, actualOutput - roleUsed) : 0;
@@ -7578,9 +7587,15 @@ async function handleFinishJob(e) {
     console.log('📋 Job data prepared for summary:', pendingJobData);
 
     if (usesUnit1ProcessInputs(selectedJob)) {
-        closeModal('finish-modal-overlay');
-        e.target.reset();
-        await submitUnit1FinishJob(pendingJobData);
+        setFinishSubmitBusy(true);
+        try {
+            await submitUnit1FinishJob(pendingJobData);
+            e.target.reset();
+        } catch (err) {
+            alert('❌ Submit failed: ' + (err.message || err));
+        } finally {
+            setFinishSubmitBusy(false);
+        }
         return;
     }
 
@@ -7617,8 +7632,8 @@ async function previewFinishJobLabel() {
         return;
     }
     const roleUsed = roleUsages.reduce((s, r) => s + r.quantity_used, 0);
-    if (actualOutput + 1e-6 < roleUsed) {
-        alert('❌ Actual Output cannot be less than total inputs used');
+    if (isEmbossingJob(selectedJob) && actualOutput + 1e-6 < roleUsed) {
+        alert('❌ Actual Output cannot be less than total inputs used (embossing only)');
         return;
     }
     try {
@@ -8055,15 +8070,24 @@ async function finalizeCompletedJob(completedJob, makereadySeconds, runningSecon
     updateShiftFooterDisplay();
     updateClockButtonUI();
 
-    const qtyLine = `Quantity Processed: ${completedJob.sheetsProcessed}\nWasted: ${completedJob.wastedSheets}`;
+    const qtyLine = `Output: ${formatIssueKgsDisplay(completedJob.sheetsProcessed)} KGS · Wastage: ${formatIssueKgsDisplay(completedJob.wastedSheets)} KGS`;
     if (saveResult?.duplicate) {
-        alert(`ℹ️ Job ${completedJob.jobNumber} was already saved.\n\n${qtyLine}\n\nDuplicate submit ignored.`);
+        showActionToast({
+            title: 'Already submitted',
+            message: `Job ${completedJob.jobNumber} was already saved. Duplicate submit ignored.`,
+            type: 'info',
+            duration: 6000
+        });
     } else if (saveResult?.success && saveResult.sapPosted) {
-        let msg = `✅ Job ${completedJob.jobNumber} completed successfully!\n\n${qtyLine}`;
+        let successMsg = `${qtyLine}`;
         if (saveResult.autoIssue?.success) {
-            msg += `\n\nAuto-issued to ${saveResult.autoIssue.targetProcess} PO ${saveResult.autoIssue.targetPO}`;
+            successMsg += `<br>Auto-issued to ${saveResult.autoIssue.targetProcess} PO ${saveResult.autoIssue.targetPO}`;
         }
-        alert(msg);
+        showActionToast({
+            title: 'Submitted successfully',
+            message: `Job ${completedJob.jobNumber} completed.<br>${successMsg}`,
+            duration: saveResult.autoIssue?.success ? 9000 : 7000
+        });
     } else if (saveResult?.success && saveResult.sapPosted === false) {
         const sapErr = String(saveResult.sapError || 'Unknown error');
         const unit1Job = isUnit1HolographicJob(completedJob);

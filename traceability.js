@@ -161,6 +161,9 @@
             const warn = o.noInputsRecorded
                 ? '<span class="trace-warn-pill"> ⚠ No inputs linked — finish job with input selection</span>'
                 : '';
+            const completionMeta = (o.completionOperator || o.completionMachine)
+                ? `<span class="trace-completion-meta">Report completed by: <strong>${esc(o.completionOperator || '—')}</strong>${o.completionMachine ? ` · ${esc(o.completionMachine)}` : ''}</span>`
+                : '';
             return `
                 <div class="trace-group">
                     <div class="trace-group-head">
@@ -168,6 +171,7 @@
                             <span class="trace-arrow">Output →</span>
                             <a class="trace-out-batch trace-batch-link" href="#" data-batch="${esc(o.outputBatch)}">${esc(o.outputBatch)}</a>
                             ${warn}
+                            ${completionMeta}
                         </div>
                         <span class="trace-pill">${o.inputCount || 0} input(s) · ${o.totalInputQty || 0} KGS in${o.outputQty != null ? ` · ${o.outputQty} KGS out` : ''}</span>
                     </div>
@@ -182,7 +186,7 @@
                             </tr>
                         </thead>
                         <tbody>${rows}</tbody>
-                    </table>` : '<div class="trace-empty" style="padding:24px">No inputs linked for this output batch.</div>'}
+                    </table>` : `<div class="trace-empty" style="padding:24px">No inputs linked for this output batch.${o.completionOperator ? `<br>Report completed by <strong>${esc(o.completionOperator)}</strong>${o.completionMachine ? ` (${esc(o.completionMachine)})` : ''}.` : ''}</div>`}
                 </div>`;
         }).join('');
 
@@ -251,6 +255,7 @@
                         ${json.poNum ? `PO ${esc(json.poNum)}` : ''}
                         ${json.outputQty != null ? ` · Output: <strong>${json.outputQty} KGS</strong>` : ''}
                         ${json.itemCode ? ` · Item: ${esc(json.itemCode)}` : ''}
+                        ${json.completionOperator ? ` · Operator: <strong>${esc(json.completionOperator)}</strong>${json.completionMachine ? ` (${esc(json.completionMachine)})` : ''}` : ''}
                     </div>
                 </div>`;
 

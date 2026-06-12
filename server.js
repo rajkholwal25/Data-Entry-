@@ -48,6 +48,7 @@ const {
     getIssuedRolesWithRemaining,
     getProcessInputsWithRemaining,
     recordRoleBatchUsages,
+    backfillRoleBatchUsageOperators,
     getUnit1BatchNum,
     getGenealogyByPO,
     getGenealogyByOutputBatch,
@@ -5721,10 +5722,11 @@ app.post('/api/job-complete', async (req, res) => {
                     result.batch_num,
                     jobData.role_usages,
                     {
-                        operator_name: jobData.operator_name || null,
-                        machine_name: jobData.machine_name || null
+                        operator_name: jobData.operator_name || jobData.operatorName || null,
+                        machine_name: jobData.machine_name || jobData.machineName || null
                     }
                 );
+                await backfillRoleBatchUsageOperators(jobData.po_num);
                 console.log(`   ✅ Recorded ${recorded} input usage row(s) → output batch ${result.batch_num}`);
             } catch (usageErr) {
                 console.warn('⚠️ role_batch_usage save failed (non-blocking):', usageErr.message);
@@ -6802,15 +6804,24 @@ app.get('/api/traceability/by-batch/:batchNum', async (req, res) => {
         let poNum = inputs[0]?.po_num || null;
         let outputQty = null;
         let itemCode = null;
+        let completionOperator = null;
+        let completionMachine = null;
         try {
+            if (poNum) await backfillRoleBatchUsageOperators(poNum);
             const [prodRows] = await pool.query(
-                `SELECT po_num, quantity_processed, fg_num FROM production_records WHERE batch_num = ? LIMIT 1`,
+                `SELECT po_num, quantity_processed, fg_num, operator_name, machine_name
+                   FROM production_records
+                  WHERE batch_num = ?
+                  ORDER BY job_end_time DESC NULLS LAST
+                  LIMIT 1`,
                 [batchNum]
             );
             if (prodRows[0]) {
                 poNum = poNum || prodRows[0].po_num;
                 outputQty = Number(prodRows[0].quantity_processed) || null;
                 itemCode = prodRows[0].fg_num;
+                completionOperator = prodRows[0].operator_name || null;
+                completionMachine = prodRows[0].machine_name || null;
             }
         } catch (_) { /* non-blocking */ }
         const totalInputQty = inputs.reduce((s, r) => s + (Number(r.quantity) || 0), 0);
@@ -6835,6 +6846,8 @@ app.get('/api/traceability/by-batch/:batchNum', async (req, res) => {
             poNum,
             outputQty,
             itemCode,
+            completionOperator,
+            completionMachine,
             count: inputs.length,
             totalInputQty,
             inputs: inputs.map((r) => {
@@ -6848,8 +6861,8 @@ app.get('/api/traceability/by-batch/:batchNum', async (req, res) => {
                     sourcePoNum: meta.sourcePoNum || null,
                     inputType: r.input_type || 'raw_roll',
                     warehouse: r.warehouse,
-                    operator: r.operator_name,
-                    machine: r.machine_name,
+                    operator: r.operator_name || completionOperator,
+                    machine: r.machine_name || completionMachine,
                     usedAt: r.used_at
                 };
             })
@@ -8398,8 +8411,10 @@ app.post('/api/fg-entry', async (req, res) => {
             qcSupervisor,
             operatorName,
             remarks,
-            pkdDetails
+            pkdDetails,
+            role_usages: roleUsagesBody
         } = req.body;
+        const role_usages = Array.isArray(roleUsagesBody) ? roleUsagesBody : [];
 
         console.log('\n📦 ========== FINISHED GOODS ENTRY ==========');
         console.log(`   PO Number: ${poNumber}`);
@@ -8448,6 +8463,25 @@ app.post('/api/fg-entry', async (req, res) => {
             dbResult = await insertJobActivities(jobData, [{ activity_name: 'FG_ENTRY', activity_time_minutes: 0 }]);
             batchNumber = dbResult.batch_num;
             console.log(`   ✅ Database save successful. Batch: ${batchNumber}`);
+
+            if (batchNumber && role_usages.length > 0) {
+                try {
+                    const completionOperator = operatorName || qcSupervisor || null;
+                    const recorded = await recordRoleBatchUsages(
+                        poNumber,
+                        batchNumber,
+                        role_usages,
+                        {
+                            operator_name: completionOperator,
+                            machine_name: 'FG-Entry'
+                        }
+                    );
+                    await backfillRoleBatchUsageOperators(poNumber);
+                    console.log(`   ✅ FG traceability: ${recorded} input usage row(s) → ${batchNumber}`);
+                } catch (usageErr) {
+                    console.warn('⚠️ FG role_batch_usage save failed (non-blocking):', usageErr.message);
+                }
+            }
         } catch (dbError) {
             console.error('   ❌ Database save failed:', dbError.message);
             return res.status(500).json({

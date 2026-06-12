@@ -812,6 +812,17 @@ a.trace-batch-link:hover {
   font-size: 0.6875rem;
 }
 
+.trace-completion-meta {
+  display: block;
+  margin-top: 6px;
+  font-size: 0.8125rem;
+  color: #a7f3d0;
+}
+
+.trace-completion-meta strong {
+  color: #ecfdf5;
+}
+
 .trace-row-unused td {
   opacity: 0.75;
 }

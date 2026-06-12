@@ -1240,3 +1240,99 @@ body {
         padding-bottom: max(24px, env(safe-area-inset-bottom));
     }
 }
+
+.form-input-readonly {
+    background: rgba(16, 185, 129, 0.08);
+    border-color: rgba(16, 185, 129, 0.35);
+    color: var(--primary-light);
+    font-weight: 700;
+    cursor: default;
+}
+
+.role-picker-add-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+
+.role-picker-select {
+    flex: 1;
+    min-width: 200px;
+    padding: 10px 12px;
+    background: var(--bg-input);
+    border: 2px solid var(--border-color);
+    border-radius: var(--radius-md);
+    font-size: 0.9rem;
+    color: var(--text-primary);
+}
+
+.role-picker .btn-sm {
+    padding: 10px 16px;
+    font-size: 0.8rem;
+}
+
+.role-selected-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.role-selected-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 12px 14px;
+    background: rgba(15, 23, 42, 0.5);
+    border: 1px solid rgba(16, 185, 129, 0.35);
+    border-radius: var(--radius-md);
+}
+
+.role-selected-row .role-batch-label {
+    font-family: ui-monospace, monospace;
+    font-weight: 700;
+    font-size: 0.85rem;
+    min-width: 120px;
+    color: var(--primary-light);
+}
+
+.role-selected-row .role-avail {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.role-selected-row .role-used-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+}
+
+.role-selected-row .fg-input-qty {
+    width: 96px;
+    padding: 8px 10px;
+    background: var(--bg-input);
+    border: 2px solid rgba(16, 185, 129, 0.45);
+    border-radius: var(--radius-sm);
+    font-weight: 700;
+    text-align: center;
+    color: var(--text-primary);
+}
+
+.role-selected-row .role-qty-unit {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+}
+
+.role-selected-row .role-remove-btn {
+    margin-left: auto;
+    padding: 6px 12px;
+    font-size: 0.75rem;
+    background: rgba(239, 68, 68, 0.12);
+    color: #fca5a5;
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+}

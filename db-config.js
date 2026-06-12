@@ -290,21 +290,85 @@ async function ensureSchema() {
     `);
 
     try {
-        await pool.query(`
-            UPDATE role_batch_usage rbu
-               SET operator_name = pr.operator_name,
-                   machine_name = pr.machine_name
-              FROM production_records pr
-             WHERE pr.batch_num = rbu.output_batch
-               AND (rbu.operator_name IS NULL OR TRIM(rbu.operator_name) = '')
-        `);
+        await backfillRoleBatchUsageOperators();
     } catch (_) { /* non-blocking */ }
 
     console.log('✅ Production schema ready (production_records, material_issue_log, role_batch_usage, views, batch_num_seq)');
 }
 
+const GENERIC_OPERATOR_NAMES = new Set(['', 'Operator', 'Unknown']);
+
+function isUsableOperatorName(name) {
+    const v = String(name || '').trim();
+    return v.length > 0 && !GENERIC_OPERATOR_NAMES.has(v);
+}
+
+/** Aggregated completion operator/machine per output batch (one row per batch_num). */
+const PR_COMPLETION_SUBQUERY = `
+    SELECT batch_num,
+           MAX(CASE WHEN operator_name IS NOT NULL
+                     AND TRIM(operator_name) NOT IN ('', 'Operator', 'Unknown')
+                THEN operator_name END) AS operator_name,
+           MAX(CASE WHEN machine_name IS NOT NULL AND TRIM(machine_name) <> ''
+                THEN machine_name END) AS machine_name,
+           MAX(quantity_processed) AS quantity_processed,
+           MAX(fg_num) AS fg_num,
+           MAX(process_name) AS process_name,
+           MIN(job_start_time) AS job_start_time
+      FROM production_records
+     GROUP BY batch_num`;
+
+/** Backfill report-completion operator on role_batch_usage from production_records. */
+async function backfillRoleBatchUsageOperators(poNum = null) {
+    const po = poNum != null ? String(poNum).trim() : '';
+    const poClause = po ? 'AND rbu.po_num = ?' : '';
+    const params = po ? [po] : [];
+    const [result] = await pool.query(
+        `UPDATE role_batch_usage rbu
+            SET operator_name = COALESCE(
+                    NULLIF(TRIM(rbu.operator_name), ''),
+                    pr.operator_name
+                ),
+                machine_name = COALESCE(
+                    NULLIF(TRIM(rbu.machine_name), ''),
+                    pr.machine_name
+                )
+           FROM (${PR_COMPLETION_SUBQUERY}) pr
+          WHERE pr.batch_num = rbu.output_batch
+            AND (
+                rbu.operator_name IS NULL OR TRIM(rbu.operator_name) = ''
+                OR rbu.operator_name IN ('Operator', 'Unknown')
+                OR rbu.machine_name IS NULL OR TRIM(rbu.machine_name) = ''
+            )
+            ${poClause}`,
+        params
+    );
+    return result.affectedRows || 0;
+}
+
+async function resolveCompletionOperatorMeta(outputBatch, completionMeta = {}) {
+    let operatorName = completionMeta.operator_name || completionMeta.operatorName || null;
+    let machineName = completionMeta.machine_name || completionMeta.machineName || null;
+    if ((!isUsableOperatorName(operatorName) || !machineName) && outputBatch) {
+        const [rows] = await pool.query(
+            `SELECT operator_name, machine_name
+               FROM (${PR_COMPLETION_SUBQUERY}) pr
+              WHERE pr.batch_num = ?
+              LIMIT 1`,
+            [String(outputBatch).trim()]
+        );
+        if (!isUsableOperatorName(operatorName)) {
+            operatorName = rows[0]?.operator_name || operatorName;
+        }
+        if (!machineName) {
+            machineName = rows[0]?.machine_name || machineName;
+        }
+    }
+    return { operatorName: operatorName || null, machineName: machineName || null };
+}
+
 /** Unit 1 process chain — each step consumes previous step output batches. */
-const UNIT1_PROCESS_CHAIN = ['EMB', 'MET', 'COT', 'SLT', 'REW'];
+const UNIT1_PROCESS_CHAIN = ['EMB', 'MET', 'COT', 'SLT', 'REW', 'FG'];
 
 function getPreviousUnit1ProcessTag(processTag) {
     const t = String(processTag || '').toUpperCase();
@@ -370,6 +434,7 @@ function getUnit1ProcessBatchTag(uPCode, processName, machineName, itemCode) {
     if (u.includes('SLT')) return 'SLT';
     if (u.includes('REW')) return 'REW';
     if (u.includes('EMB')) return 'EMB';
+    if (u === 'FG' || u.includes('FINISHED')) return 'FG';
 
     const fromItem = inferUnit1ProcessTagFromItemCode(itemCode);
     if (fromItem) return fromItem;
@@ -1207,8 +1272,7 @@ async function getIssuedRolesWithRemaining(poNum) {
 /** Record roll/batch consumption for one report completion (source of truth for traceability). */
 async function recordRoleBatchUsages(poNum, outputBatch, usages, completionMeta = {}) {
     if (!Array.isArray(usages) || usages.length === 0) return 0;
-    const operatorName = completionMeta.operator_name || completionMeta.operatorName || null;
-    const machineName = completionMeta.machine_name || completionMeta.machineName || null;
+    const { operatorName, machineName } = await resolveCompletionOperatorMeta(outputBatch, completionMeta);
     let count = 0;
     for (const u of usages) {
         const qty = Number(u.quantity_used ?? u.quantityUsed) || 0;
@@ -1279,7 +1343,7 @@ async function getGenealogyByOutputBatch(outputBatch) {
            FROM role_batch_usage rbu
            LEFT JOIN material_issue_log mil
                   ON mil.issue_id = rbu.issue_id
-           LEFT JOIN production_records pr_out
+           LEFT JOIN (${PR_COMPLETION_SUBQUERY}) pr_out
                   ON pr_out.batch_num = rbu.output_batch
           WHERE rbu.output_batch = ?
           ORDER BY rbu.created_at ASC, rbu.usage_id ASC`,
@@ -1321,7 +1385,7 @@ async function getGenealogyByPO(poNum) {
                 pr_out.machine_name AS completion_machine
            FROM role_batch_usage rbu
            LEFT JOIN material_issue_log mil ON mil.issue_id = rbu.issue_id
-           LEFT JOIN production_records pr_out ON pr_out.batch_num = rbu.output_batch
+           LEFT JOIN (${PR_COMPLETION_SUBQUERY}) pr_out ON pr_out.batch_num = rbu.output_batch
           WHERE rbu.po_num = ?
           ORDER BY rbu.output_batch ASC NULLS LAST, rbu.created_at ASC`,
         [po]
@@ -1356,6 +1420,10 @@ async function getPOTraceabilitySummary(poNum, options = {}) {
     if (!po) {
         return { poNum: po, inputBatches: [], outputBatches: [], genealogy: [] };
     }
+
+    try {
+        await backfillRoleBatchUsageOperators(po);
+    } catch (_) { /* non-blocking */ }
 
     let fgItemCode = options.fgItemCode || options.fg_num || null;
     if (!fgItemCode) {
@@ -1485,15 +1553,20 @@ async function getPOTraceabilitySummary(poNum, options = {}) {
     }
 
     const [prodRows] = await pool.query(
-        `SELECT batch_num, quantity_processed, fg_num, job_start_time
-           FROM production_records
-          WHERE po_num = ?
+        `SELECT batch_num, quantity_processed, fg_num, job_start_time,
+                operator_name, machine_name, process_name
+           FROM (${PR_COMPLETION_SUBQUERY}) pr
+          WHERE batch_num IN (
+              SELECT DISTINCT batch_num FROM production_records WHERE po_num = ?
+          )
           ORDER BY batch_num ASC`,
         [po]
     );
     for (const pr of prodRows) {
         const bn = pr.batch_num;
         if (!bn) continue;
+        const completionOperator = isUsableOperatorName(pr.operator_name) ? pr.operator_name : null;
+        const completionMachine = pr.machine_name || null;
         if (!outputMap.has(bn)) {
             outputMap.set(bn, {
                 outputBatch: bn,
@@ -1503,6 +1576,9 @@ async function getPOTraceabilitySummary(poNum, options = {}) {
                 outputQty: Number(pr.quantity_processed) || 0,
                 itemCode: pr.fg_num,
                 producedAt: pr.job_start_time,
+                completionOperator,
+                completionMachine,
+                processName: pr.process_name || null,
                 noInputsRecorded: true
             });
         } else {
@@ -1510,7 +1586,9 @@ async function getPOTraceabilitySummary(poNum, options = {}) {
             o.outputQty = Number(pr.quantity_processed) || 0;
             o.itemCode = pr.fg_num;
             o.producedAt = pr.job_start_time;
-            o.noInputsRecorded = false;
+            o.completionOperator = completionOperator || o.completionOperator;
+            o.completionMachine = completionMachine || o.completionMachine;
+            o.noInputsRecorded = o.inputs.length === 0;
         }
     }
 
@@ -1564,6 +1642,12 @@ async function getPOTraceabilitySummary(poNum, options = {}) {
                     inp.issuedQty = meta.issuedQty;
                     inp.remainingQty = meta.remainingQty;
                     inp.sourcePoNum = meta.sourcePoNum;
+                }
+                if (!inp.operator && out.completionOperator) {
+                    inp.operator = out.completionOperator;
+                }
+                if (!inp.machine && out.completionMachine) {
+                    inp.machine = out.completionMachine;
                 }
             }
             return out;
@@ -1628,7 +1712,12 @@ async function getPreviousProcessOutputBatches(poNum, prevTag, fgItemCode) {
                 MAX(pr.fg_num) AS item_code,
                 MAX(pr.quantity_processed) AS output_qty,
                 MIN(pr.job_start_time) AS produced_at,
-                MAX(pr.po_num) AS source_po_num
+                MAX(pr.po_num) AS source_po_num,
+                MAX(CASE WHEN pr.operator_name IS NOT NULL
+                          AND TRIM(pr.operator_name) NOT IN ('', 'Operator', 'Unknown')
+                     THEN pr.operator_name END) AS producer_operator,
+                MAX(CASE WHEN pr.machine_name IS NOT NULL AND TRIM(pr.machine_name) <> ''
+                     THEN pr.machine_name END) AS producer_machine
            FROM production_records pr
           WHERE pr.batch_num LIKE ?
           GROUP BY pr.batch_num
@@ -1658,7 +1747,9 @@ async function getPreviousProcessOutputBatches(poNum, prevTag, fgItemCode) {
             input_type: 'process_batch',
             source_batch: r.batch_number,
             source_po_num: r.source_po_num,
-            issued_at: r.produced_at
+            issued_at: r.produced_at,
+            producer_operator: r.producer_operator || null,
+            producer_machine: r.producer_machine || null
         });
     }
     return results;
@@ -1746,6 +1837,8 @@ module.exports = {
     buildPrevProcessBatchPattern,
     getPreviousUnit1ProcessTag,
     recordRoleBatchUsages,
+    backfillRoleBatchUsageOperators,
+    resolveCompletionOperatorMeta,
     getGenealogyByPO,
     getGenealogyByOutputBatch,
     getPOTraceabilitySummary,
