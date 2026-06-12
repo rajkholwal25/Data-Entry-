@@ -688,8 +688,6 @@ const OPERATOR_LISTS = {
     'embossing-2': UNIT1_OPERATORS.embossing,
     'embossing-3': UNIT1_OPERATORS.embossing,
     'coating-1': UNIT1_OPERATORS.coating,
-    'coating-2': UNIT1_OPERATORS.coating,
-    'coating-3': UNIT1_OPERATORS.coating,
     'rewinding-1': UNIT1_OPERATORS.rewinding,
     'rewinding-2': UNIT1_OPERATORS.rewinding,
     'slitting-1': UNIT1_OPERATORS.slitting,
@@ -1151,22 +1149,14 @@ async function peekProcessOutputBatch(jobData) {
 }
 
 function buildProcessLabelPreviewHtml(labelData) {
-    const roles = labelData.rolesUsed || [];
-    const rolesHtml = roles.length
-        ? roles.map((r) => `<div>• ${r.batch_number}: <strong>${formatIssueKgsDisplay(r.quantity_used)}</strong> KGS</div>`).join('')
-        : '<div>—</div>';
-    return `
-        <div class="pl-row"><span class="pl-label">PO</span><span class="pl-value">${labelData.poNumber || ''}</span></div>
-        <div class="pl-row"><span class="pl-label">Process</span><span class="pl-value">${labelData.processName || ''}</span></div>
-        <div class="pl-row"><span class="pl-label">Output Batch</span><span class="pl-value" style="font-family:monospace;color:#7c3aed;">${labelData.outputBatch || ''}</span></div>
-        <div class="pl-row"><span class="pl-label">Output Qty</span><span class="pl-value">${formatIssueKgsDisplay(labelData.actualOutput)} KGS</span></div>
-        <div class="pl-row"><span class="pl-label">Roles Used</span><div class="pl-value">${rolesHtml}</div></div>
-        <div class="pl-row"><span class="pl-label">Operator</span><span class="pl-value">${labelData.operator || ''}</span></div>
-    `;
+    if (typeof ProcessLabelFormats !== 'undefined') {
+        return `<div class="label-preview-scale">${ProcessLabelFormats.generateProcessLabelHTML(labelData)}</div>`;
+    }
+    return `<div class="process-label-fallback">${labelData.batchNo || labelData.outputBatch || ''}</div>`;
 }
 
 function showProcessLabelPreviewModal(labelData, onConfirm, completedJobRef) {
-    _processLabelSubmitCallback = onConfirm;
+    _processLabelSubmitCallback = onConfirm || null;
     window._pendingProcessLabelData = labelData;
     window._pendingCompletedJobForLabel = completedJobRef || null;
     const host = document.getElementById('process-label-preview-host');
@@ -1204,10 +1194,26 @@ function cancelProcessLabelPreview() {
     closeModal('process-label-modal-overlay');
     _processLabelSubmitCallback = null;
     window._pendingProcessLabelData = null;
+    if (window._labelPreviewFromFinish) {
+        window._labelPreviewFromFinish = false;
+        showModal('finish-modal-overlay');
+        return;
+    }
     if (window._pendingCompletedJobForLabel) {
         pendingJobData = window._pendingCompletedJobForLabel;
         window._pendingCompletedJobForLabel = null;
     }
+}
+
+function printProcessLabelOnThisDevice() {
+    const labelData = window._pendingProcessLabelData;
+    if (!labelData || typeof ProcessLabelFormats === 'undefined') return;
+    const container = document.getElementById('process-label-print-container');
+    if (!container) return;
+    container.innerHTML = ProcessLabelFormats.generateProcessLabelHTML(labelData);
+    container.style.display = 'block';
+    window.print();
+    setTimeout(() => { container.style.display = 'none'; }, 800);
 }
 
 async function sendProcessLabelToPrinter(labelData) {
@@ -1234,24 +1240,26 @@ function wireProcessLabelModalListeners() {
     document.getElementById('process-label-modal-close')?.addEventListener('click', () => {
         cancelProcessLabelPreview();
     });
+    document.getElementById('process-label-close-btn')?.addEventListener('click', () => {
+        cancelProcessLabelPreview();
+    });
+    document.getElementById('process-label-browser-print-btn')?.addEventListener('click', () => {
+        printProcessLabelOnThisDevice();
+    });
     document.getElementById('process-label-print-btn')?.addEventListener('click', async () => {
         const labelData = window._pendingProcessLabelData;
-        if (labelData) await sendProcessLabelToPrinter(labelData);
-    });
-    document.getElementById('process-label-save-local-btn')?.addEventListener('click', () => {
-        const labelData = window._pendingProcessLabelData;
         if (labelData) {
-            saveProcessLabelLocally(labelData);
-            alert(`Label saved locally.\n\nBatch: ${labelData.outputBatch || '—'}\nPO: ${labelData.poNumber || '—'}`);
+            const payload = {
+                poNumber: labelData.jobNo || labelData.poNumber,
+                processName: labelData.processName,
+                outputBatch: labelData.batchNo || labelData.outputBatch,
+                actualOutput: labelData.quantity || labelData.actualOutput,
+                rolesUsed: labelData.rolesUsed,
+                operator: labelData.operator,
+                packedOn: labelData.packedOn
+            };
+            await sendProcessLabelToPrinter(payload);
         }
-    });
-    document.getElementById('process-label-confirm-btn')?.addEventListener('click', async () => {
-        const cb = _processLabelSubmitCallback;
-        closeModal('process-label-modal-overlay');
-        _processLabelSubmitCallback = null;
-        window._pendingProcessLabelData = null;
-        window._pendingCompletedJobForLabel = null;
-        if (cb) await cb();
     });
 }
 
@@ -5721,6 +5729,33 @@ function setupEventListeners() {
         finishCancelBtn.addEventListener('click', () => closeModal('finish-modal-overlay'));
     }
 
+    document.getElementById('finish-preview-label-btn')?.addEventListener('click', () => {
+        previewFinishJobLabel();
+    });
+
+    const backButton = document.getElementById('back-button');
+    if (backButton) {
+        backButton.addEventListener('click', (e) => {
+            const labelOpen = document.getElementById('process-label-modal-overlay')?.classList.contains('active');
+            const finishOpen = document.getElementById('finish-modal-overlay')?.classList.contains('active');
+            const summaryOpen = document.getElementById('job-summary-modal-overlay')?.classList.contains('active');
+            if (labelOpen) {
+                e.preventDefault();
+                cancelProcessLabelPreview();
+                return;
+            }
+            if (finishOpen) {
+                e.preventDefault();
+                closeModal('finish-modal-overlay');
+                return;
+            }
+            if (summaryOpen) {
+                e.preventDefault();
+                closeModal('job-summary-modal-overlay');
+            }
+        });
+    }
+
     const cancelCancelBtn = document.getElementById('cancel-cancel-btn');
     if (cancelCancelBtn) {
         cancelCancelBtn.addEventListener('click', () => closeModal('cancel-modal-overlay'));
@@ -7164,7 +7199,11 @@ function configureFinishModalFields() {
     
     const finishSubmitBtn = document.getElementById('finish-submit-btn');
     if (finishSubmitBtn) {
-        finishSubmitBtn.textContent = unit1Finish ? 'Continue to Overview' : 'Submit';
+        finishSubmitBtn.textContent = 'Submit';
+    }
+    const finishPreviewBtn = document.getElementById('finish-preview-label-btn');
+    if (finishPreviewBtn) {
+        finishPreviewBtn.style.display = unit1Finish ? '' : 'none';
     }
 
     console.log(`📋 Modal configured for: ${machineInfo.name} (Lamination: ${isLaminationMachine()}, Folding: ${isFoldingPastingMachine()}, Narendra: ${isNarendraMachine()}, Embossing: ${embossingFinish})`);
@@ -7246,7 +7285,7 @@ function getFoldingNumCartons(formData) {
     return formData.get('foldNumCartons') || '';
 }
 
-function handleFinishJob(e) {
+async function handleFinishJob(e) {
     e.preventDefault();
 
     flushCurrentStateTimeToJob();
@@ -7538,12 +7577,76 @@ function handleFinishJob(e) {
 
     console.log('📋 Job data prepared for summary:', pendingJobData);
 
-    // Close finish modal and show summary modal
+    if (usesUnit1ProcessInputs(selectedJob)) {
+        closeModal('finish-modal-overlay');
+        e.target.reset();
+        await submitUnit1FinishJob(pendingJobData);
+        return;
+    }
+
     closeModal('finish-modal-overlay');
     e.target.reset();
-
-    // Show job summary modal for review
     showJobSummaryModal(pendingJobData);
+}
+
+async function submitUnit1FinishJob(jobData) {
+    if (_jobSubmitInProgress) return;
+    _jobSubmitInProgress = true;
+    const tb = jobData.timeBreakdown || {};
+    const makereadySeconds = Math.max(tb.makeready || 0, stateTimers.makeready || 0);
+    let runningSeconds = Math.max(tb.running || 0, stateTimers.running || 0);
+    if (currentMachineState === 'running' && timerSeconds > runningSeconds) {
+        runningSeconds = timerSeconds;
+    }
+    const operatorForJob = getOperatorForSubmission();
+    try {
+        await finalizeCompletedJob(jobData, makereadySeconds, runningSeconds, operatorForJob, null, null);
+    } finally {
+        _jobSubmitInProgress = false;
+    }
+}
+
+async function previewFinishJobLabel() {
+    if (!selectedJob || typeof ProcessLabelFormats === 'undefined') return;
+    if (!usesUnit1ProcessInputs(selectedJob)) return;
+    if (!validateFinishInputUsages()) return;
+    const roleUsages = collectFinishInputUsages();
+    const actualOutput = parseFloat(document.getElementById('sheets-processed')?.value) || 0;
+    if (actualOutput <= 0) {
+        alert('❌ Enter Actual Output (KGS) before previewing the label');
+        return;
+    }
+    const roleUsed = roleUsages.reduce((s, r) => s + r.quantity_used, 0);
+    if (actualOutput + 1e-6 < roleUsed) {
+        alert('❌ Actual Output cannot be less than total inputs used');
+        return;
+    }
+    try {
+        const peekJob = {
+            poNumber: selectedJob.poNumber || selectedJob.jobNumber,
+            itemNo: selectedJob.itemNo || '',
+            uPCode: selectedJob.uPCode || '',
+            jobStartTime: selectedJob.jobStartTime || getISTTimestamp(),
+            machine_name: machineInfo?.name || ''
+        };
+        const outputBatch = await peekProcessOutputBatch(peekJob);
+        const labelData = ProcessLabelFormats.buildLabelDataFromFinish({
+            job: selectedJob,
+            machineInfo,
+            poNumber: peekJob.poNumber,
+            outputBatch,
+            actualOutput,
+            roleUsages,
+            operator: getOperatorForSubmission() || 'Unknown',
+            customerName: selectedJob.customerName
+        });
+        window._labelPreviewFromFinish = true;
+        closeModal('finish-modal-overlay');
+        wireProcessLabelModalListeners();
+        showProcessLabelPreviewModal(labelData, null, null);
+    } catch (err) {
+        alert('Could not preview label: ' + (err.message || err));
+    }
 }
 
 // Helper functions for time conversion
@@ -7810,15 +7913,26 @@ async function confirmJobFinish() {
     if (completedJob.isEmbossing || completedJob.usesProcessInputs) {
         try {
             const outputBatch = await peekProcessOutputBatch(completedJob);
-            const labelData = {
-                poNumber: completedJob.poNumber || completedJob.jobNumber,
-                processName: machineInfo?.process || 'Embossing',
-                outputBatch,
-                actualOutput: completedJob.sheetsProcessed,
-                rolesUsed: completedJob.roleUsages || [],
-                operator: operatorForJob || 'Unknown',
-                packedOn: new Date().toLocaleDateString('en-IN')
-            };
+            const labelData = typeof ProcessLabelFormats !== 'undefined'
+                ? ProcessLabelFormats.buildLabelDataFromFinish({
+                    job: selectedJob || completedJob,
+                    machineInfo,
+                    poNumber: completedJob.poNumber || completedJob.jobNumber,
+                    outputBatch,
+                    actualOutput: completedJob.sheetsProcessed,
+                    roleUsages: completedJob.roleUsages || [],
+                    operator: operatorForJob || 'Unknown',
+                    customerName: completedJob.customerName
+                })
+                : {
+                    poNumber: completedJob.poNumber || completedJob.jobNumber,
+                    processName: machineInfo?.process || 'Embossing',
+                    outputBatch,
+                    actualOutput: completedJob.sheetsProcessed,
+                    rolesUsed: completedJob.roleUsages || [],
+                    operator: operatorForJob || 'Unknown',
+                    packedOn: new Date().toLocaleDateString('en-IN')
+                };
             completedJob._previewOutputBatch = outputBatch;
             releaseConfirmBtn();
             const summaryConfirmLabel = confirmBtn ? confirmBtn.textContent : 'Confirm';

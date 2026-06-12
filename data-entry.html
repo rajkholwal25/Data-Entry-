@@ -236,7 +236,8 @@
             </div>
             <div class="modal-actions page-footer-actions">
                 <button type="button" class="btn-secondary" id="finish-cancel-btn">Cancel</button>
-                <button type="submit" form="finish-job-form" class="btn-primary" id="finish-submit-btn">Continue to Overview</button>
+                <button type="button" class="btn-secondary" id="finish-preview-label-btn" style="display:none;">Preview / Print Label</button>
+                <button type="submit" form="finish-job-form" class="btn-primary" id="finish-submit-btn">Submit</button>
             </div>
         </div>
     </div>
@@ -249,13 +250,13 @@
                 <button class="modal-close" type="button" id="process-label-modal-close">&times;</button>
             </div>
             <div class="modal-body fullscreen-page-body">
-                <p class="form-hint" id="process-label-hint">Output batch generated. Print or save locally, then Submit to post to SAP and database.</p>
-                <div id="process-label-preview-host" class="process-label-preview-host"></div>
+                <p class="form-hint" id="process-label-hint">Preview output label. Close (×) to return to Finish Job.</p>
+                <div id="process-label-preview-host" class="label-preview-host"></div>
             </div>
             <div class="modal-actions page-footer-actions">
-                <button type="button" class="btn-secondary" id="process-label-print-btn">Print</button>
-                <button type="button" class="btn-secondary" id="process-label-save-local-btn">Save locally</button>
-                <button type="button" class="btn-primary" id="process-label-confirm-btn">Submit</button>
+                <button type="button" class="btn-secondary" id="process-label-browser-print-btn">Print on this device</button>
+                <button type="button" class="btn-secondary" id="process-label-print-btn">Send to label printer</button>
+                <button type="button" class="btn-primary" id="process-label-close-btn">Close</button>
             </div>
         </div>
     </div>
@@ -482,9 +483,12 @@
         </div>
     </div>
 
+    <div id="process-label-print-container" class="process-label-print-container" aria-hidden="true"></div>
+
     <script src="validation.js"></script>
     <script src="live-tracking.js"></script>
-    <script src="data-entry.js?v=20260311h"></script>
+    <script src="process-label-formats.js"></script>
+    <script src="data-entry.js?v=20260612b"></script>
 </body>
 
 </html>

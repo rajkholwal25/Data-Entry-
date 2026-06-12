@@ -4093,3 +4093,241 @@ body {
     font-weight: 600;
     color: var(--text-primary);
 }
+
+/* FG-style process output label (preview + print) */
+.label-preview-host {
+    overflow: auto;
+    max-height: min(62vh, 560px);
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    background: #e2e8f0;
+    padding: 16px;
+    border-radius: var(--radius-md);
+}
+
+.label-preview-scale {
+    width: 108mm;
+    height: 72mm;
+    margin: 0 auto;
+    position: relative;
+    flex-shrink: 0;
+}
+
+.label-preview-scale .label-page {
+    position: absolute;
+    top: 0;
+    left: 0;
+    transform: scale(0.72);
+    transform-origin: top left;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+}
+
+.label-page,
+.label-page-inner {
+    width: 150mm;
+    height: 100mm;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.sap-label {
+    width: 150mm;
+    height: 100mm;
+    padding: 5mm 6mm;
+    box-sizing: border-box;
+    border: 1.5px solid #222;
+    border-radius: 3mm;
+    background: #fff;
+    color: #000;
+    font-family: Calibri, Carlito, Arial, Helvetica, sans-serif;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.sap-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 4mm;
+    flex-shrink: 0;
+}
+
+.sap-logo img {
+    width: 28.75mm;
+    max-height: 16mm;
+    height: auto;
+    display: block;
+    object-fit: contain;
+}
+
+.sap-company {
+    text-align: right;
+    font-size: 3.3mm;
+    line-height: 1.25;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.sap-company strong {
+    display: block;
+    font-size: 3.4mm;
+    letter-spacing: 0.15mm;
+    font-weight: 700;
+}
+
+.sap-title {
+    margin: 2mm 0 2.5mm;
+    text-align: center;
+    font-weight: 700;
+    font-size: 6.2mm;
+    letter-spacing: 0.25mm;
+    flex-shrink: 0;
+}
+
+.sap-fields {
+    flex: 1 1 auto;
+    min-height: 0;
+    font-size: 4.2mm;
+    line-height: 1.2;
+}
+
+.sap-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+}
+
+.sap-table td {
+    padding: 0.7mm 0;
+    vertical-align: baseline;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.sap-fields-table .k,
+.sap-table .k {
+    width: 30mm;
+    color: #333;
+    font-weight: 500;
+}
+
+.sap-table .v {
+    font-weight: 600;
+    word-break: break-word;
+}
+
+.sap-details-grid .col-k { width: 30mm; }
+.sap-details-grid .col-v { width: 36mm; }
+.sap-details-grid .col-rk { width: 22mm; }
+.sap-details-grid .col-rv { width: auto; }
+
+.sap-details-grid td {
+    padding: 0.7mm 0;
+    vertical-align: top;
+}
+
+.sap-details-grid .rk {
+    color: #333;
+    font-weight: 500;
+}
+
+.sap-details-grid .rv {
+    font-weight: 600;
+}
+
+.sap-details-grid .barcode-cell {
+    width: 58mm;
+    vertical-align: top;
+    padding-left: 2mm;
+    text-align: center;
+}
+
+.sap-barcode-title {
+    text-align: center;
+    font-size: 3.6mm;
+    font-weight: 600;
+}
+
+.sap-barcode {
+    display: grid;
+    justify-items: center;
+    row-gap: 1mm;
+}
+
+.sap-barcode svg {
+    width: 55mm;
+    height: 12mm;
+    display: block;
+    margin: 0 auto;
+}
+
+.sap-barcode .code-text {
+    font-size: 3.9mm;
+    letter-spacing: 0.45mm;
+    font-weight: 500;
+    text-align: center;
+    word-break: break-all;
+}
+
+.process-label-print-container {
+    display: none;
+}
+
+@media print {
+    @page {
+        size: 150mm 100mm;
+        margin: 0;
+    }
+
+    html,
+    body {
+        width: 150mm;
+        height: 100mm;
+        margin: 0 !important;
+        padding: 0 !important;
+        background: white !important;
+    }
+
+    body * {
+        visibility: hidden;
+    }
+
+    #process-label-print-container,
+    #process-label-print-container * {
+        visibility: visible;
+    }
+
+    #process-label-print-container {
+        display: block !important;
+        position: fixed;
+        left: 0;
+        top: 0;
+        margin: 0;
+        padding: 0;
+        width: 150mm;
+        height: 100mm;
+    }
+
+    .label-page {
+        page-break-after: always;
+        page-break-inside: avoid;
+        width: 150mm !important;
+        height: 100mm !important;
+        overflow: hidden !important;
+        border: 0 !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        background: white !important;
+        color: #000 !important;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+    }
+
+    .label-page-inner {
+        width: 150mm !important;
+        height: 100mm !important;
+        transform: none !important;
+    }
+}

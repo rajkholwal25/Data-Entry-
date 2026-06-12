@@ -3556,7 +3556,7 @@ function isUnit1AuxMaterialItemNo(itemNo) {
 /** Unit 1 machine ids (URL ?machine=...) — no SAP resource / running-cost tracking. */
 const UNIT1_MACHINE_IDS = new Set([
     'embossing-1', 'embossing-2', 'embossing-3',
-    'coating-1', 'coating-2', 'coating-3',
+    'coating-1',
     'rewinding-1', 'rewinding-2',
     'slitting-1', 'slitting-2',
     'metallisation-1'
