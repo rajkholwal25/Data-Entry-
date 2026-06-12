@@ -157,6 +157,10 @@
                             <span class="stat-label">Already Done</span>
                             <span class="stat-value" id="selected-job-completed" style="color: #10b981;">-</span>
                         </div>
+                        <div class="stat-item embossing-only-stat" id="selected-job-chemical-wrap" style="display: none;">
+                            <span class="stat-label">Chemical Used</span>
+                            <span class="stat-value" id="selected-job-chemical" style="color: #ec4899;">-</span>
+                        </div>
                         <div class="stat-item">
                             <span class="stat-label">Remaining</span>
                             <span class="stat-value" id="selected-job-remaining" style="color: #f59e0b;">-</span>
@@ -197,12 +201,7 @@
                             <div class="form-group">
                                 <label for="embossing-role-used">Role Used (KGS) *</label>
                                 <input type="number" id="embossing-role-used" name="embossingRoleUsed" min="0" step="any">
-                                <small class="form-hint">Film/role RM consumed (remaining = issued − total role used)</small>
-                            </div>
-                            <div class="form-group">
-                                <label for="embossing-chemical-used">Chemical Used (KGS) *</label>
-                                <input type="number" id="embossing-chemical-used" name="embossingChemicalUsed" min="0" step="any" value="0">
-                                <small class="form-hint">Coating weight used — not issued separately in SAP</small>
+                                <small class="form-hint">Film/role RM consumed this batch</small>
                             </div>
                         </div>
                         <div class="form-group" id="sheets-processed-group">
@@ -213,7 +212,7 @@
                         <div class="form-group" id="wasted-sheets-group">
                             <label for="wasted-sheets" id="wasted-sheets-label">Wasted Quantity (KGS) *</label>
                             <input type="number" id="wasted-sheets" name="wastedSheets" min="0" step="any">
-                            <small class="form-hint" id="wasted-sheets-hint" style="display: none;">Auto: (Role + Chemical) − Actual Output</small>
+                            <small class="form-hint" id="wasted-sheets-hint" style="display: none;">Estimated from role only — final wastage on completion report after chemical is entered</small>
                         </div>
                     </div>
                     
@@ -275,7 +274,8 @@
                             </div>
                             <div class="form-group">
                                 <label for="summary-embossing-chemical-used">Chemical Used (KGS) *</label>
-                                <input type="number" id="summary-embossing-chemical-used" name="embossingChemicalUsed" min="0" step="any" disabled>
+                                <input type="number" id="summary-embossing-chemical-used" name="embossingChemicalUsed" min="0" step="any" value="0">
+                                <small class="form-hint">Coating weight this batch — stored locally; not counted against issued role RM</small>
                             </div>
                         </div>
                         <div class="form-group" id="summary-sheets-group">

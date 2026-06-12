@@ -3592,6 +3592,25 @@ function isUnit1ProcessCode(uPCode) {
         u.includes('MET') || u.includes('MTL') || u.includes('COT');
 }
 
+/** U_PCode from job-complete payload (client may send u_p_code, u_pcode, or uPCode). */
+function getJobDataUPCode(jobData) {
+    if (!jobData) return '';
+    return String(
+        jobData.u_p_code ?? jobData.u_pcode ?? jobData.uPCode ?? jobData.process_code ?? ''
+    ).trim();
+}
+
+/** True when job completion should use Unit 1 flow (no SAP resources, item-code batches). */
+function isUnit1JobFromData(jobData) {
+    if (!jobData) return false;
+    if (isUnit1ProcessCode(getJobDataUPCode(jobData))) return true;
+    if (isUnit1Machine(jobData.machine_name)) return true;
+    const proc = String(jobData.process_name || '').toLowerCase();
+    return proc.includes('embossing') || proc.includes('coating') ||
+        proc.includes('rewinding') || proc.includes('slitting') ||
+        proc.includes('metallisation') || proc.includes('metallization');
+}
+
 /** Embossing only — chemical adds to done qty but not to RM issue/remaining. */
 function isEmbossingProcessCode(uPCode) {
     const u = String(uPCode || '').toUpperCase();
@@ -4869,9 +4888,9 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
                 );
                 if (isEmbossingProcessCode(productionOrder.U_PCode)) {
                     const emb = await getEmbossingQuantitiesByPO(String(docNumber));
+                    embossingChemicalUsedQuantity = emb.chemicalUsed;
                     if (emb.trackedBatches > 0) {
                         embossingRoleUsedQuantity = emb.roleUsed;
-                        embossingChemicalUsedQuantity = emb.chemicalUsed;
                     }
                 }
             } catch (localErr) {
@@ -5479,18 +5498,17 @@ app.post('/api/job-complete', async (req, res) => {
         }
 
         // All validations passed - insert job to local database
-        const isUnit1JobComplete = isUnit1ProcessCode(jobData.u_pcode || jobData.uPCode || jobData.process_code) ||
-            isUnit1Machine(jobData.machine_name);
+        const isUnit1JobComplete = isUnit1JobFromData(jobData);
         const fgForBatch = (jobData.fg_num || jobData.item_no || '').trim();
 
         if (isUnit1JobComplete && fgForBatch) {
             jobData.use_item_code_batch = true;
-            if (!jobData.u_pcode && !jobData.uPCode && jobData.absolute_entry) {
+            if (!getJobDataUPCode(jobData) && jobData.absolute_entry) {
                 try {
                     const poHead = await sapGetRequest(
                         `/ProductionOrders(${jobData.absolute_entry})?$select=U_PCode,ItemNo`
                     );
-                    jobData.u_pcode = poHead.U_PCode || '';
+                    jobData.u_p_code = poHead.U_PCode || '';
                     if (!fgForBatch && poHead.ItemNo) {
                         jobData.fg_num = poHead.ItemNo;
                     }
@@ -5499,7 +5517,7 @@ app.post('/api/job-complete', async (req, res) => {
                 }
             }
             jobData._batch_process_tag = getUnit1ProcessBatchTag(
-                jobData.u_pcode || jobData.uPCode || jobData.process_code,
+                getJobDataUPCode(jobData),
                 jobData.process_name,
                 jobData.machine_name,
                 fgForBatch
@@ -5590,8 +5608,7 @@ app.post('/api/job-complete', async (req, res) => {
         let resourceIssueResult = null;
 
         if (jobData.absolute_entry) {
-            const isUnit1Job = isUnit1ProcessCode(jobData.u_pcode || jobData.uPCode) ||
-                isUnit1Machine(jobData.machine_name);
+            const isUnit1Job = isUnit1JobFromData(jobData);
 
             if (isUnit1Job) {
                 try {

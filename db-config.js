@@ -148,8 +148,13 @@ async function ensureSchema() {
         }
     }
 
+    // PostgreSQL cannot add/reorder view columns via CREATE OR REPLACE — drop first.
+    await pool.query('DROP VIEW IF EXISTS vw_shift_summary');
+    await pool.query('DROP VIEW IF EXISTS vw_job_summary');
+    await pool.query('DROP VIEW IF EXISTS vw_batch_summary');
+
     await pool.query(`
-        CREATE OR REPLACE VIEW vw_batch_summary AS
+        CREATE VIEW vw_batch_summary AS
         SELECT batch_num,
                MAX(po_num)               AS po_num,
                MAX(fg_num)               AS fg_num,
@@ -171,7 +176,7 @@ async function ensureSchema() {
     `);
 
     await pool.query(`
-        CREATE OR REPLACE VIEW vw_job_summary AS
+        CREATE VIEW vw_job_summary AS
         SELECT batch_num,
                MAX(po_num)               AS po_num,
                MAX(fg_num)               AS fg_num,
@@ -194,7 +199,7 @@ async function ensureSchema() {
     `);
 
     await pool.query(`
-        CREATE OR REPLACE VIEW vw_shift_summary AS
+        CREATE VIEW vw_shift_summary AS
         SELECT machine_name,
                (job_start_time)::date    AS shift_date,
                shift_type,

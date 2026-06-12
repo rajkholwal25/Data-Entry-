@@ -815,26 +815,37 @@ function isEmbossingJob(job) {
     return u.includes('EMB');
 }
 
-/** Cumulative role RM consumed (embossing only). Null when not tracked yet. */
+/** Cumulative chemical used (embossing only) — stored in local DB per PO. */
+function getEmbossingChemicalUsedQty(job) {
+    if (!job || !isEmbossingJob(job)) return 0;
+    return Number(job.embossingChemicalUsedQuantity) || 0;
+}
+
+/**
+ * Cumulative role RM consumed (embossing only).
+ * SAP/local "done" qty includes role + chemical — subtract chemical to get pure role used.
+ */
 function getEmbossingRoleUsedQty(job) {
     if (!job || !isEmbossingJob(job)) return null;
     if (job.embossingRoleUsedQuantity != null && !Number.isNaN(Number(job.embossingRoleUsedQuantity))) {
         return Number(job.embossingRoleUsedQuantity) || 0;
     }
     const completed = job.completedQuantity || 0;
-    const issued = getJobIssuedQtyForDisplay(job);
-    if (completed <= issued) return completed;
-    // Legacy batches without role/chemical split: assume all issued role is consumed
-    return issued;
+    const chemical = getEmbossingChemicalUsedQty(job);
+    return Math.max(0, completed - chemical);
 }
 
-/** Remaining role RM = issued − role used (embossing). Null when role usage unknown. */
+/**
+ * Remaining pure role RM (embossing only).
+ * Already Done includes role + chemical in output → subtract chemical from local DB first.
+ * Remaining = Issued − (Already Done − Chemical Used)
+ */
 function computeEmbossingRemainingRoleQty(job) {
     if (!isEmbossingJob(job)) return null;
     const issued = getJobIssuedQtyForDisplay(job);
-    const roleUsed = getEmbossingRoleUsedQty(job);
-    if (roleUsed === null) return null;
-    return Math.max(0, issued - roleUsed);
+    const done = job.completedQuantity || 0;
+    const chemical = getEmbossingChemicalUsedQty(job);
+    return Math.max(0, issued - done + chemical);
 }
 
 /** Embossing: wastage = expected (role + chemical) − actual output. */
@@ -847,11 +858,11 @@ function computeEmbossingWastage(roleUsed, chemicalUsed, actualOutput) {
 
 function updateEmbossingWastageDisplay() {
     const role = parseFloat(document.getElementById('embossing-role-used')?.value) || 0;
-    const chemical = parseFloat(document.getElementById('embossing-chemical-used')?.value) || 0;
     const actual = parseFloat(document.getElementById('sheets-processed')?.value) || 0;
     const wasteEl = document.getElementById('wasted-sheets');
     if (wasteEl) {
-        wasteEl.value = computeEmbossingWastage(role, chemical, actual);
+        // Chemical entered on job completion report — estimate wastage from role only here
+        wasteEl.value = computeEmbossingWastage(role, 0, actual);
     }
 }
 
@@ -869,12 +880,10 @@ let _embossingWastageWired = false;
 function wireEmbossingWastageListeners() {
     if (_embossingWastageWired) return;
     const roleEl = document.getElementById('embossing-role-used');
-    const chemEl = document.getElementById('embossing-chemical-used');
     const totalEl = document.getElementById('sheets-processed');
-    if (!roleEl || !chemEl || !totalEl) return;
+    if (!roleEl || !totalEl) return;
     const handler = () => updateEmbossingWastageDisplay();
     roleEl.addEventListener('input', handler);
-    chemEl.addEventListener('input', handler);
     totalEl.addEventListener('input', handler);
     _embossingWastageWired = true;
 }
@@ -2620,16 +2629,28 @@ function showJobDetails(job) {
         }
     }
     
+    const embossingJob = isEmbossingJob(job);
+    const chemicalWrap = document.getElementById('selected-job-chemical-wrap');
+    const chemicalEl = document.getElementById('selected-job-chemical');
+    if (chemicalWrap) {
+        chemicalWrap.style.display = embossingJob ? '' : 'none';
+    }
+    if (embossingJob && chemicalEl) {
+        const chemicalUsed = getEmbossingChemicalUsedQty(job);
+        chemicalEl.textContent = chemicalUsed.toLocaleString();
+        chemicalEl.title = 'Cumulative chemical (KGS) from local DB — entered on job completion reports';
+    }
+
     const jobRemainingEl = document.getElementById('selected-job-remaining');
     if (jobRemainingEl) {
         if (unit1Job || issuedQty > 0 || completedQty > 0) {
-            if (isEmbossingJob(job)) {
+            if (embossingJob) {
                 const remRole = computeEmbossingRemainingRoleQty(job);
-                const roleTracked = job.embossingRoleUsedQuantity != null;
+                const chemicalUsed = getEmbossingChemicalUsedQty(job);
                 jobRemainingEl.textContent = remRole.toLocaleString();
-                jobRemainingEl.title = roleTracked
-                    ? 'Remaining role RM (issued − role used; chemical not counted)'
-                    : 'Estimated from SAP done qty — enter role/chemical at finish for exact tracking';
+                jobRemainingEl.title = chemicalUsed > 0
+                    ? `Remaining role RM = Issued (${issuedQty}) − (Done (${completedQty}) − Chemical (${chemicalUsed}))`
+                    : 'Enter chemical on job completion report — Remaining = Issued − (Done − Chemical)';
             } else {
                 jobRemainingEl.textContent = remainingQty.toLocaleString();
                 jobRemainingEl.title = '';
@@ -3685,11 +3706,11 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
             left: 0;
             right: 0;
             bottom: 0;
-            background: rgba(15, 23, 42, 0.85);
+            background: rgba(15, 23, 42, 0.92);
             backdrop-filter: blur(4px);
             display: flex;
-            justify-content: center;
-            align-items: center;
+            justify-content: stretch;
+            align-items: stretch;
             z-index: 10000;
             animation: fadeIn 0.2s ease-out;
             overscroll-behavior: contain;
@@ -3732,17 +3753,21 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                 ${shortfallHtml}`;
         }
 
+        const isEmbossingRoleIssue = isEmbossingJob(selectedJob) || String(machineInfo?.process || '').toLowerCase().includes('embossing');
+        const dialogTitle = isEmbossingRoleIssue ? 'Role Issue' : 'Material Issue';
+
         const modal = document.createElement('div');
-        modal.className = 'rmc-modal';
+        modal.className = 'rmc-modal rmc-modal-fullscreen';
         modal.style.cssText = `
             background: white;
-            border-radius: 16px;
-            width: 95%;
-            max-width: 700px;
-            max-height: 90vh;
+            border-radius: 0;
+            width: 100%;
+            height: 100%;
+            max-width: none;
+            max-height: none;
             overflow: hidden;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.4);
-            animation: slideUp 0.3s ease-out;
+            box-shadow: none;
+            animation: fadeIn 0.2s ease-out;
             display: flex;
             flex-direction: column;
         `;
@@ -3750,12 +3775,12 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
         const progressText = totalCount > 1 ? ` (${currentIndex} of ${totalCount})` : '';
         
         modal.innerHTML = `
-            <div style="background: linear-gradient(135deg, #7c3aed 0%, #5b21b6 100%); padding: 16px 20px; color: white; flex-shrink: 0;">
-                <h2 style="margin: 0 0 4px 0; font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 8px;">
-                    <svg width="22" height="22" fill="currentColor" viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14l-5-5 1.41-1.41L12 14.17l4.59-4.58L18 11l-6 6z"/></svg>
-                    Material Issue${progressText}
+            <div style="background: linear-gradient(135deg, #7c3aed 0%, #5b21b6 100%); padding: 18px 24px; color: white; flex-shrink: 0;">
+                <h2 style="margin: 0 0 4px 0; font-size: 22px; font-weight: 700; display: flex; align-items: center; gap: 8px;">
+                    <svg width="24" height="24" fill="currentColor" viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 14l-5-5 1.41-1.41L12 14.17l4.59-4.58L18 11l-6 6z"/></svg>
+                    ${dialogTitle}${progressText}
                 </h2>
-                <p style="margin: 0; font-size: 12px; opacity: 0.9;">Select batches and quantities to issue (KGS)</p>
+                <p style="margin: 0; font-size: 13px; opacity: 0.9;">Select rolls/batches and quantities to issue (KGS)</p>
             </div>
             
             <div id="rmc-planned-banner" style="padding: 10px 16px; background: #fffbeb; border-bottom: 1px solid #fde68a; flex-shrink: 0; font-size: 12px; color: #92400e;">
@@ -3796,17 +3821,16 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                 <div id="rmc-loading" style="padding: 40px; text-align: center; color: #64748b;">
                     <div style="font-size: 14px;">Loading batches...</div>
                 </div>
-                <table id="rmc-batch-table" style="width: 100%; min-width: ${isFirstProcessRMIssue ? '820px' : '720px'}; border-collapse: collapse; display: none;">
+                <table id="rmc-batch-table" style="width: 100%; min-width: ${isFirstProcessRMIssue ? '760px' : '640px'}; border-collapse: collapse; display: none;">
                     <thead style="background: #f1f5f9; position: sticky; top: 0;">
                         <tr>
-                            <th style="padding: 10px 8px; text-align: center; font-size: 11px; font-weight: 600; color: #64748b; width: 40px;"></th>
-                            <th style="padding: 10px 8px; text-align: left; font-size: 11px; font-weight: 600; color: #64748b;">Batch #</th>
-                            <th style="padding: 10px 8px; text-align: left; font-size: 11px; font-weight: 600; color: #64748b;">Grade</th>
-                            <th style="padding: 10px 8px; text-align: right; font-size: 11px; font-weight: 600; color: #64748b;">Length (m)</th>
-                            <th style="padding: 10px 8px; text-align: right; font-size: 11px; font-weight: 600; color: #64748b;">Width (mm)</th>
-                            <th style="padding: 10px 8px; text-align: right; font-size: 11px; font-weight: 600; color: #64748b;">Available</th>
-                            <th style="padding: 10px 8px; text-align: center; font-size: 11px; font-weight: 600; color: #64748b; width: 90px;">Issue Qty</th>
-                            ${isFirstProcessRMIssue ? `<th style="padding: 10px 8px; text-align: right; font-size: 11px; font-weight: 600; color: #0f766e; width: 100px;">Will Produce (kg)</th>` : ''}
+                            <th style="padding: 12px 10px; text-align: center; font-size: 12px; font-weight: 600; color: #64748b; width: 44px;"></th>
+                            <th style="padding: 12px 10px; text-align: left; font-size: 12px; font-weight: 600; color: #64748b;">Batch / Roll #</th>
+                            <th style="padding: 12px 10px; text-align: right; font-size: 12px; font-weight: 600; color: #64748b;">Length (m)</th>
+                            <th style="padding: 12px 10px; text-align: right; font-size: 12px; font-weight: 600; color: #64748b;">Width (mm)</th>
+                            <th style="padding: 12px 10px; text-align: right; font-size: 12px; font-weight: 600; color: #64748b;">Available</th>
+                            <th style="padding: 12px 10px; text-align: center; font-size: 12px; font-weight: 600; color: #64748b; width: 100px;">Issue Qty</th>
+                            ${isFirstProcessRMIssue ? `<th style="padding: 12px 10px; text-align: right; font-size: 12px; font-weight: 600; color: #0f766e; width: 110px;">Will Produce (kg)</th>` : ''}
                         </tr>
                     </thead>
                     <tbody id="rmc-batch-tbody"></tbody>
@@ -3839,8 +3863,8 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                 <button id="rmc-partial-btn" style="display: none; padding: 10px 16px; background: #fffbeb; color: #92400e; border: 1px solid #fde68a; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 700;">
                     Continue with issued qty
                 </button>
-                <button id="rmc-issue-btn" style="padding: 10px 20px; background: #7c3aed; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600;">
-                    Issue Material
+                <button id="rmc-issue-btn" style="padding: 12px 24px; background: #7c3aed; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 700;">
+                    Review &amp; Issue
                 </button>
                 <button id="rmc-next-btn" style="padding: 10px 20px; background: #10b981; color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; display: none;">
                     ${isLast ? 'Finish' : 'Next'} →
@@ -4098,35 +4122,30 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                 const n = Number(raw);
                 return Number.isFinite(n) ? n : 0;
             };
-            const gradeStr = (b) => {
-                const g = b.grade ?? b.Grade ?? b.U_GRADE ?? b.u_grade;
-                return (g != null && String(g).trim() !== '') ? String(g) : 'N/A';
-            };
             batchTbody.innerHTML = '';
             batches.forEach((batch, idx) => {
                 const batchDisplay = formatBatchForDisplay(batch.batchNumber);
                 const row = document.createElement('tr');
                 row.style.cssText = 'border-bottom: 1px solid #f1f5f9;';
                 row.innerHTML = `
-                    <td style="padding: 8px; text-align: center;">
+                    <td style="padding: 10px; text-align: center;">
                         <input type="checkbox" class="batch-checkbox" data-idx="${idx}" 
-                            style="width: 18px; height: 18px; cursor: pointer;">
+                            style="width: 20px; height: 20px; cursor: pointer;">
                     </td>
-                    <td style="padding: 8px; font-size: 14px; font-family: monospace; color: #1e293b; line-height: 1.35;">${batchDisplay.html}${batch._warehouse ? `<div style="font-size:10px;color:#7c3aed;font-weight:600;margin-top:2px;font-family:system-ui,sans-serif;">${batch._warehouse}</div>` : ''}</td>
-                    <td style="padding: 8px; font-size: 13px; color: #374151; font-weight: 500;">${gradeStr(batch)}</td>
-                    <td style="padding: 8px; font-size: 13px; text-align: right; color: #374151;">${dim(batch, 'len')}</td>
-                    <td style="padding: 8px; font-size: 13px; text-align: right; color: #374151;">${dim(batch, 'wid')}</td>
-                    <td style="padding: 8px; font-size: 14px; text-align: right; font-weight: 700; color: #7c3aed;">${batch.available || 0}</td>
-                    <td style="padding: 8px; text-align: center;">
+                    <td style="padding: 10px; font-size: 14px; font-family: monospace; color: #1e293b; line-height: 1.35;">${batchDisplay.html}${batch._warehouse ? `<div style="font-size:10px;color:#7c3aed;font-weight:600;margin-top:2px;font-family:system-ui,sans-serif;">${batch._warehouse}</div>` : ''}</td>
+                    <td style="padding: 10px; font-size: 13px; text-align: right; color: #374151;">${dim(batch, 'len')}</td>
+                    <td style="padding: 10px; font-size: 13px; text-align: right; color: #374151;">${dim(batch, 'wid')}</td>
+                    <td style="padding: 10px; font-size: 14px; text-align: right; font-weight: 700; color: #7c3aed;">${batch.available || 0}</td>
+                    <td style="padding: 10px; text-align: center;">
                         <input type="number" class="batch-qty-input" data-idx="${idx}" data-batch="${batch.batchNumber}" 
                             data-available="${batch.available}" value="" min="0" max="${batch.available}" step="1"
-                            style="width: 70px; padding: 6px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 13px; text-align: center; font-weight: 600;"
+                            style="width: 80px; padding: 8px; border: 1px solid #e2e8f0; border-radius: 4px; font-size: 14px; text-align: center; font-weight: 600;"
                             disabled>
                     </td>
-                    ${isFirstProcessRMIssue ? `<td style="padding: 8px; text-align: center;">
+                    ${isFirstProcessRMIssue ? `<td style="padding: 10px; text-align: center;">
                         <input type="number" class="batch-produce-input" data-idx="${idx}" data-width="${dim(batch, 'wid')}"
                             value="" min="0" step="any" placeholder="—"
-                            style="width: 80px; padding: 6px; border: 1px solid #5eead4; border-radius: 4px; font-size: 13px; text-align: center; font-weight: 600; background: #f0fdfa; color: #0f766e;"
+                            style="width: 90px; padding: 8px; border: 1px solid #5eead4; border-radius: 4px; font-size: 14px; text-align: center; font-weight: 600; background: #f0fdfa; color: #0f766e;"
                             disabled>
                     </td>` : ''}
                 `;
@@ -4434,44 +4453,105 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                 });
             });
         }
-        
-        // Issue button
-        issueBtn.addEventListener('click', async () => {
-            const batchAllocations = [];
-            const qtyInputs = batchTbody.querySelectorAll('.batch-qty-input');
-            
-            qtyInputs.forEach(input => {
-                if (!input.disabled) {
-                    const qty = parseFloat(input.value) || 0;
-                    if (qty > 0) {
-                        batchAllocations.push({
-                            batchNumber: input.dataset.batch,
-                            quantity: qty
-                        });
-                    }
-                }
+
+        function collectSelectedBatchAllocations() {
+            const allocations = [];
+            batchTbody.querySelectorAll('.batch-qty-input').forEach((input) => {
+                if (input.disabled) return;
+                const qty = parseFloat(input.value) || 0;
+                if (qty <= 0) return;
+                const idx = input.dataset.idx;
+                const batchMeta = allBatches.find((b) => b.batchNumber === input.dataset.batch) || {};
+                const produceInput = batchTbody.querySelector(`.batch-produce-input[data-idx="${idx}"]`);
+                const willProduce = produceInput ? (parseFloat(produceInput.value) || 0) : 0;
+                const batchDisplay = formatBatchForDisplay(input.dataset.batch);
+                allocations.push({
+                    batchNumber: input.dataset.batch,
+                    batchLabel: batchDisplay.text || input.dataset.batch,
+                    quantity: qty,
+                    willProduce,
+                    warehouse: batchMeta._warehouse || activeWarehouse || material?.warehouse || ''
+                });
             });
-            
-            if (batchAllocations.length === 0) {
-                alert('Please select at least one batch and enter quantity to issue');
-                return;
-            }
-            
-            const totalQty = batchAllocations.reduce((sum, b) => sum + b.quantity, 0);
-            
+            return allocations;
+        }
+
+        function showIssuePreviewConfirm(allocations, totalQty) {
+            return new Promise((previewResolve) => {
+                const previewOverlay = document.createElement('div');
+                previewOverlay.style.cssText = `
+                    position: fixed; inset: 0; z-index: 10001;
+                    background: rgba(15, 23, 42, 0.75);
+                    display: flex; align-items: center; justify-content: center;
+                    padding: 16px;
+                `;
+                const produceCol = isFirstProcessRMIssue;
+                const rowsHtml = allocations.map((a) => `
+                    <tr style="border-bottom: 1px solid #e2e8f0;">
+                        <td style="padding: 12px 10px; font-family: monospace; font-size: 13px; color: #0f172a;">${a.batchLabel}</td>
+                        <td style="padding: 12px 10px; font-size: 13px; color: #64748b;">${a.warehouse || '—'}</td>
+                        <td style="padding: 12px 10px; text-align: right; font-weight: 700; color: #16a34a;">${formatIssueKgs(a.quantity)}</td>
+                        ${produceCol ? `<td style="padding: 12px 10px; text-align: right; font-weight: 600; color: #0f766e;">${a.willProduce > 0 ? formatIssueKgs(a.willProduce) : '—'}</td>` : ''}
+                    </tr>
+                `).join('');
+
+                previewOverlay.innerHTML = `
+                    <div style="background: white; border-radius: 16px; width: 100%; max-width: 720px; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.45);">
+                        <div style="padding: 18px 22px; background: linear-gradient(135deg, #059669 0%, #047857 100%); color: white;">
+                            <div style="font-size: 20px; font-weight: 800;">Confirm ${isEmbossingRoleIssue ? 'Role' : 'Material'} Issue</div>
+                            <div style="font-size: 13px; opacity: 0.95; margin-top: 4px;">Review selected rolls before issuing to SAP</div>
+                        </div>
+                        <div style="padding: 14px 22px; background: #f8fafc; border-bottom: 1px solid #e2e8f0; font-size: 13px; color: #334155;">
+                            <strong>Material:</strong> <span style="font-family: monospace;">${material.itemNo}</span>
+                            &nbsp;|&nbsp; <strong>Total issue:</strong> <span style="color:#16a34a;font-weight:800;">${formatIssueKgs(totalQty)} KGS</span>
+                            &nbsp;|&nbsp; <strong>Rolls:</strong> ${allocations.length}
+                        </div>
+                        <div style="flex: 1; overflow: auto; padding: 0 22px;">
+                            <table style="width: 100%; border-collapse: collapse; margin: 12px 0;">
+                                <thead>
+                                    <tr style="background: #f1f5f9;">
+                                        <th style="padding: 10px; text-align: left; font-size: 11px; color: #64748b;">Batch / Roll</th>
+                                        <th style="padding: 10px; text-align: left; font-size: 11px; color: #64748b;">Warehouse</th>
+                                        <th style="padding: 10px; text-align: right; font-size: 11px; color: #64748b;">Issue Qty (KGS)</th>
+                                        ${produceCol ? `<th style="padding: 10px; text-align: right; font-size: 11px; color: #64748b;">Will Produce (kg)</th>` : ''}
+                                    </tr>
+                                </thead>
+                                <tbody>${rowsHtml}</tbody>
+                            </table>
+                        </div>
+                        <div style="padding: 16px 22px; background: #f8fafc; border-top: 1px solid #e2e8f0; display: flex; gap: 10px; justify-content: flex-end;">
+                            <button type="button" id="rmc-preview-back" style="padding: 11px 18px; background: white; border: 1px solid #e2e8f0; border-radius: 8px; font-weight: 700; color: #64748b; cursor: pointer;">Back</button>
+                            <button type="button" id="rmc-preview-confirm" style="padding: 11px 22px; background: #059669; border: none; border-radius: 8px; font-weight: 800; color: white; cursor: pointer;">Confirm &amp; Issue</button>
+                        </div>
+                    </div>
+                `;
+                document.body.appendChild(previewOverlay);
+                const cleanup = () => {
+                    try { document.body.removeChild(previewOverlay); } catch (_) {}
+                };
+                previewOverlay.querySelector('#rmc-preview-back').addEventListener('click', () => {
+                    cleanup();
+                    previewResolve(false);
+                });
+                previewOverlay.querySelector('#rmc-preview-confirm').addEventListener('click', () => {
+                    cleanup();
+                    previewResolve(true);
+                });
+            });
+        }
+
+        async function performBatchIssue(batchAllocations, totalQty) {
             issueBtn.disabled = true;
             issueBtn.textContent = 'Issuing...';
-            
+
             const currentSuffix = supportsNumericSuffixEdit ? suffixInput.value.replace(/\D/g, '').padStart(4, '0') : originalSuffix;
             const finalItemCode = supportsNumericSuffixEdit ? itemCodePrefix + currentSuffix : material.itemNo;
             const itemCodeWasChanged = supportsNumericSuffixEdit && (currentSuffix !== originalSuffix);
 
-            // Pick the best warehouse: use the tagged warehouse from the first selected batch,
-            // or fall back to the material's warehouse, or the first smart-search WH.
             const firstSelectedBatch = allBatches.find(b =>
                 batchAllocations.some(a => a.batchNumber === b.batchNumber));
             const issueWarehouse = firstSelectedBatch?._warehouse || activeWarehouse || material?.warehouse || getWarehouseSearchList()[0] || '';
-            
+
             try {
                 const { resp: response, json: result } = await fetchJsonWithAutoRelease(
                     `${API_CONFIG.BASE_URL}/issue-rmc-batches`,
@@ -4483,7 +4563,7 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                             documentNumber: documentNumber,
                             itemCode: finalItemCode,
                             lineNumber: material.lineNumber,
-                            batchAllocations: batchAllocations,
+                            batchAllocations: batchAllocations.map(({ batchNumber, quantity }) => ({ batchNumber, quantity })),
                             warehouse: issueWarehouse || undefined,
                             remarks: `PO ${documentNumber}: material issued via Data Entry WebApp - ${batchAllocations.length} batch(es), total ${totalQty}`,
                             itemCodeChanged: itemCodeWasChanged,
@@ -4494,33 +4574,47 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                     },
                     { absoluteEntry, documentNumber }
                 );
-                
+
                 if (result.success) {
                     materialIssued = true;
                     lastIssuedQtyThisDialog = totalQty;
                     issueBtn.style.display = 'none';
                     nextBtn.style.display = 'block';
-                    
-                    // Disable all inputs after successful issue
+
                     suffixInput.disabled = true;
                     searchInput.disabled = true;
                     clearBtn.disabled = true;
                     batchTbody.querySelectorAll('input').forEach(inp => inp.disabled = true);
-                    
-                    // Show success message in the summary area
+
                     totalIssueSpan.parentElement.innerHTML = `
                         <span style="color: #16a34a; font-weight: 600;">✓ Issued ${totalQty} KGS successfully</span>
                     `;
                 } else {
                     alert(`Failed to issue material:\n${result.message || result.error || 'Unknown error'}`);
                     issueBtn.disabled = false;
-                    issueBtn.textContent = 'Issue Material';
+                    issueBtn.textContent = 'Review & Issue';
                 }
             } catch (error) {
                 alert(`Error issuing material:\n${error.message}`);
                 issueBtn.disabled = false;
-                issueBtn.textContent = 'Issue Material';
+                issueBtn.textContent = 'Review & Issue';
             }
+        }
+        
+        // Issue button — show preview first, then issue on confirm
+        issueBtn.addEventListener('click', async () => {
+            const batchAllocations = collectSelectedBatchAllocations();
+
+            if (batchAllocations.length === 0) {
+                alert('Please select at least one roll/batch and enter quantity to issue');
+                return;
+            }
+
+            const totalQty = batchAllocations.reduce((sum, b) => sum + b.quantity, 0);
+            const confirmed = await showIssuePreviewConfirm(batchAllocations, totalQty);
+            if (!confirmed) return;
+
+            await performBatchIssue(batchAllocations, totalQty);
         });
         
         // Next button
@@ -6561,7 +6655,6 @@ function configureFinishModalFields() {
     // Clear required attributes first
     document.getElementById('sheets-processed')?.removeAttribute('required');
     document.getElementById('embossing-role-used')?.removeAttribute('required');
-    document.getElementById('embossing-chemical-used')?.removeAttribute('required');
     document.getElementById('wasted-sheets')?.removeAttribute('required');
     document.getElementById('wasted-sheets')?.removeAttribute('readonly');
     document.getElementById('sheet-length')?.removeAttribute('required');
@@ -6583,7 +6676,6 @@ function configureFinishModalFields() {
         if (wastedHint) wastedHint.style.display = 'block';
         if (wasteEl) wasteEl.setAttribute('readonly', 'readonly');
         document.getElementById('embossing-role-used')?.setAttribute('required', 'required');
-        document.getElementById('embossing-chemical-used')?.setAttribute('required', 'required');
         document.getElementById('sheets-processed')?.setAttribute('required', 'required');
         updateEmbossingWastageDisplay();
         wireEmbossingWastageListeners();
@@ -6752,21 +6844,16 @@ function handleFinishJob(e) {
         }
     } else if (isEmbossingJob(selectedJob)) {
         const embossingRoleUsed = parseFloat(formData.get('embossingRoleUsed')) || 0;
-        const embossingChemicalUsed = parseFloat(formData.get('embossingChemicalUsed')) || 0;
         sheetsProcessed = parseFloat(formData.get('sheetsProcessed')) || 0;
         if (embossingRoleUsed <= 0) {
             alert('❌ Please enter Role Used (KGS)');
-            return;
-        }
-        if (embossingChemicalUsed < 0) {
-            alert('❌ Please enter Chemical Used (KGS)');
             return;
         }
         if (sheetsProcessed <= 0) {
             alert('❌ Please enter Actual Output (KGS)');
             return;
         }
-        wastedSheets = computeEmbossingWastage(embossingRoleUsed, embossingChemicalUsed, sheetsProcessed);
+        wastedSheets = computeEmbossingWastage(embossingRoleUsed, 0, sheetsProcessed);
         machineSpeed = 0;
         remarks = formData.get('remarks') || '';
     } else {
@@ -6778,10 +6865,8 @@ function handleFinishJob(e) {
     }
 
     let embossingRoleUsed = 0;
-    let embossingChemicalUsed = 0;
     if (isEmbossingJob(selectedJob)) {
         embossingRoleUsed = parseFloat(formData.get('embossingRoleUsed')) || 0;
-        embossingChemicalUsed = parseFloat(formData.get('embossingChemicalUsed')) || 0;
     }
 
     // Add makeready type to remarks if available
@@ -6910,7 +6995,7 @@ function handleFinishJob(e) {
                 `Role already used: ${getEmbossingRoleUsedQty(selectedJob) ?? 0} KGS\n` +
                 `Remaining role RM: ${remainingRole} KGS\n\n` +
                 `Your role used: ${embossingRoleUsed} KGS\n` +
-                `Chemical (${embossingChemicalUsed} KGS) is not counted against RM issue.`
+                `Chemical is entered on the job completion report and is not counted against RM issue.`
             );
             return;
         }
@@ -6963,7 +7048,7 @@ function handleFinishJob(e) {
         remarks: remarks,
         isEmbossing: embossingFinishJob,
         embossingRoleUsed: embossingFinishJob ? embossingRoleUsed : 0,
-        embossingChemicalUsed: embossingFinishJob ? embossingChemicalUsed : 0,
+        embossingChemicalUsed: 0,
         baseQuantities: selectedJob.baseQuantities || [],
         uPCode: selectedJob.uPCode || '',
         jobStartTime: selectedJob.jobStartTime || getISTTimestamp(),
@@ -7102,7 +7187,11 @@ function showJobSummaryModal(data) {
         const roleEl = document.getElementById('summary-embossing-role-used');
         const chemEl = document.getElementById('summary-embossing-chemical-used');
         if (roleEl) roleEl.value = data.embossingRoleUsed ?? 0;
-        if (chemEl) chemEl.value = data.embossingChemicalUsed ?? 0;
+        if (chemEl) {
+            chemEl.value = '';
+            chemEl.disabled = false;
+            chemEl.setAttribute('required', 'required');
+        }
         wireSummaryEmbossingWastageListeners();
     } else {
         const summaryWastedHint = document.getElementById('summary-wasted-hint');
@@ -7125,7 +7214,7 @@ function showJobSummaryModal(data) {
         wastedSheetsEl.value = data.isEmbossing
             ? computeEmbossingWastage(
                 data.embossingRoleUsed ?? 0,
-                data.embossingChemicalUsed ?? 0,
+                0,
                 data.sheetsProcessed ?? 0
             )
             : data.wastedSheets;
@@ -7158,7 +7247,6 @@ function showJobSummaryModal(data) {
     const editableFields = [
         'summary-sheets-processed',
         'summary-embossing-role-used',
-        'summary-embossing-chemical-used',
         'summary-remarks',
         'summary-packing-details'
     ];
@@ -7271,14 +7359,15 @@ async function confirmJobFinish() {
     // Update data from form
     if (pendingJobData.isEmbossing) {
         const roleUsed = parseFloat(document.getElementById('summary-embossing-role-used')?.value) || 0;
-        const chemicalUsed = parseFloat(document.getElementById('summary-embossing-chemical-used')?.value) || 0;
+        const chemicalRaw = document.getElementById('summary-embossing-chemical-used')?.value;
+        const chemicalUsed = chemicalRaw === '' || chemicalRaw == null ? NaN : parseFloat(chemicalRaw);
         const actualOutput = parseFloat(document.getElementById('summary-sheets-processed')?.value) || 0;
         if (roleUsed <= 0) {
             alert('❌ Please enter Role Used (KGS)');
             return;
         }
-        if (chemicalUsed < 0) {
-            alert('❌ Please enter Chemical Used (KGS)');
+        if (Number.isNaN(chemicalUsed) || chemicalUsed < 0) {
+            alert('❌ Please enter Chemical Used (KGS) on this completion report');
             return;
         }
         if (actualOutput <= 0) {
@@ -7291,8 +7380,8 @@ async function confirmJobFinish() {
         pendingJobData.wastedSheets = computeEmbossingWastage(roleUsed, chemicalUsed, actualOutput);
     } else {
         pendingJobData.sheetsProcessed = parseFloat(document.getElementById('summary-sheets-processed').value) || 0;
+        pendingJobData.wastedSheets = parseFloat(document.getElementById('summary-wasted-sheets').value) || 0;
     }
-    pendingJobData.wastedSheets = parseFloat(document.getElementById('summary-wasted-sheets').value) || 0;
     pendingJobData.machineSpeed = 0;
     pendingJobData.remarks = document.getElementById('summary-remarks').value;
 
@@ -7511,7 +7600,9 @@ async function completeJobInDatabase(jobData, makereadySeconds, runningSeconds, 
             absolute_entry: jobData.absoluteEntry || null,  // SAP AbsoluteEntry for InventoryGenEntries
             packing_details: jobData.packingDetails || '',   // Packing details (U_nopkg)
             u_job_ent: jobData.uJobEnt ?? null,
-            u_p_code: jobData.uPCode || ''
+            u_p_code: jobData.uPCode || '',
+            u_pcode: jobData.uPCode || '',
+            uPCode: jobData.uPCode || ''
         };
         
         // Debug: Log SAP posting fields
