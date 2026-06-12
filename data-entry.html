@@ -13,7 +13,7 @@
     <title>VK Global Digital - Production Tracking</title>
     <meta name="description" content="VK Global Digital - Machine-specific production tracking and job management">
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect fill='%231e40af' width='100' height='100' rx='20'/%3E%3Ctext x='50' y='65' font-family='Arial' font-size='45' font-weight='bold' fill='white' text-anchor='middle'%3EVK%3C/text%3E%3C/svg%3E">
-    <link rel="stylesheet" href="data-entry.css?v=20260121c">
+    <link rel="stylesheet" href="data-entry.css?v=20260612a">
 </head>
 
 <body>
@@ -186,60 +186,88 @@
         </button>
     </div>
 
-    <!-- Finish Job Modal -->
-    <div class="modal-overlay" id="finish-modal-overlay">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2 class="modal-title">Finish Job</h2>
+    <!-- Finish Job — full page (Unit 1 report completion data entry) -->
+    <div class="modal-overlay fullscreen-page" id="finish-modal-overlay">
+        <div class="modal-content fullscreen-page-content">
+            <div class="modal-header fullscreen-page-header">
+                <h2 class="modal-title">Finish Job — Report Completion</h2>
                 <button class="modal-close" id="finish-modal-close">&times;</button>
             </div>
-            <div class="modal-body">
+            <div class="modal-body fullscreen-page-body">
                 <form id="finish-job-form">
-                    <!-- Standard Fields -->
                     <div id="standard-fields">
-                        <div id="embossing-fields" style="display: none;">
+                        <div id="finish-unit1-fields" style="display: none;">
                             <div class="form-group">
-                                <label for="embossing-role-used">Role Used (KGS) *</label>
-                                <input type="number" id="embossing-role-used" name="embossingRoleUsed" min="0" step="any">
-                                <small class="form-hint">Film/role RM consumed this batch</small>
+                                <label id="finish-inputs-label">Inputs Used *</label>
+                                <div id="finish-role-picker" class="role-picker">
+                                    <div class="role-picker-add-row">
+                                        <select id="finish-role-add-select" class="role-picker-select">
+                                            <option value="">— Select input batch —</option>
+                                        </select>
+                                        <button type="button" class="btn-secondary btn-sm" id="finish-role-add-btn">Add</button>
+                                    </div>
+                                    <div id="finish-role-selected-list" class="role-selected-list"></div>
+                                </div>
+                                <small class="form-hint" id="finish-inputs-hint">Select rolls/batches used this run (partial use OK — remainder stays for next batch)</small>
                             </div>
+                            <input type="hidden" id="finish-embossing-role-used" value="0">
                         </div>
                         <div class="form-group" id="sheets-processed-group">
-                            <label for="sheets-processed">Quantity Processed (KGS) *</label>
+                            <label for="sheets-processed" id="sheets-processed-label">Quantity Processed (KGS) *</label>
                             <input type="number" id="sheets-processed" name="sheetsProcessed" min="0" step="any">
-                            <small class="form-hint" id="sheets-processed-hint" style="display: none;">Actual quantity produced this batch (posted to SAP)</small>
+                            <small class="form-hint" id="sheets-processed-hint">Actual quantity produced this batch (posted to SAP)</small>
+                        </div>
+                        <div class="form-group" id="finish-chemical-group" style="display: none;">
+                            <label for="finish-embossing-chemical-used">Chemical Used (KGS)</label>
+                            <input type="number" id="finish-embossing-chemical-used" name="embossingChemicalUsed" min="0" step="any" value="0" readonly>
+                            <small class="form-hint">Auto: Actual Output − Total Inputs Used</small>
                         </div>
                         <div class="form-group" id="wasted-sheets-group">
                             <label for="wasted-sheets" id="wasted-sheets-label">Wasted Quantity (KGS) *</label>
                             <input type="number" id="wasted-sheets" name="wastedSheets" min="0" step="any">
-                            <small class="form-hint" id="wasted-sheets-hint" style="display: none;">Estimated from role only — final wastage on completion report after chemical is entered</small>
+                            <small class="form-hint" id="wasted-sheets-hint">Auto-calculated for embossing</small>
                         </div>
                     </div>
-                    
-                    <!-- Remarks -->
                     <div class="form-group" id="standard-remarks">
                         <label for="finish-remarks">Remarks</label>
-                        <textarea id="finish-remarks" name="remarks" rows="3"
-                            placeholder="Optional remarks..."></textarea>
-                    </div>
-                    
-                    <div class="modal-actions">
-                        <button type="button" class="btn-secondary" id="finish-cancel-btn">Cancel</button>
-                        <button type="submit" class="btn-primary">Submit</button>
+                        <textarea id="finish-remarks" name="remarks" rows="3" placeholder="Optional remarks..."></textarea>
                     </div>
                 </form>
+            </div>
+            <div class="modal-actions page-footer-actions">
+                <button type="button" class="btn-secondary" id="finish-cancel-btn">Cancel</button>
+                <button type="submit" form="finish-job-form" class="btn-primary" id="finish-submit-btn">Continue to Overview</button>
             </div>
         </div>
     </div>
 
-    <!-- Job Summary Modal (after finish) -->
-    <div class="modal-overlay" id="job-summary-modal-overlay">
-        <div class="modal-content modal-large">
-            <div class="modal-header">
-                <h2 class="modal-title">Job Summary - <span id="summary-job-number"></span></h2>
+    <!-- Process output label preview (embossing report completion) — full page -->
+    <div class="modal-overlay fullscreen-page" id="process-label-modal-overlay">
+        <div class="modal-content fullscreen-page-content">
+            <div class="modal-header fullscreen-page-header">
+                <h2 class="modal-title">Process Output Label</h2>
+                <button class="modal-close" type="button" id="process-label-modal-close">&times;</button>
+            </div>
+            <div class="modal-body fullscreen-page-body">
+                <p class="form-hint" id="process-label-hint">Output batch generated. Print or save locally, then Submit to post to SAP and database.</p>
+                <div id="process-label-preview-host" class="process-label-preview-host"></div>
+            </div>
+            <div class="modal-actions page-footer-actions">
+                <button type="button" class="btn-secondary" id="process-label-print-btn">Print</button>
+                <button type="button" class="btn-secondary" id="process-label-save-local-btn">Save locally</button>
+                <button type="button" class="btn-primary" id="process-label-confirm-btn">Submit</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Report completion / job summary — full page (after Finish Job) -->
+    <div class="modal-overlay fullscreen-page" id="job-summary-modal-overlay">
+        <div class="modal-content fullscreen-page-content">
+            <div class="modal-header fullscreen-page-header">
+                <h2 class="modal-title">Job Overview — <span id="summary-job-number"></span></h2>
                 <button class="modal-close" id="job-summary-modal-close">&times;</button>
             </div>
-            <div class="modal-body">
+            <div class="modal-body fullscreen-page-body">
                 <div class="summary-section">
                     <h3 class="summary-section-title">Time Breakdown</h3>
                     <form id="job-summary-form">
@@ -265,50 +293,24 @@
                 </div>
 
                 <div class="summary-section">
-                    <h3 class="summary-section-title">Production Details</h3>
-                    <form id="job-summary-form">
-                        <div id="summary-embossing-fields" style="display: none;">
-                            <div class="form-group">
-                                <label for="summary-embossing-role-used">Role Used (KGS) *</label>
-                                <input type="number" id="summary-embossing-role-used" name="embossingRoleUsed" min="0" step="any" disabled>
-                            </div>
-                            <div class="form-group">
-                                <label for="summary-embossing-chemical-used">Chemical Used (KGS) *</label>
-                                <input type="number" id="summary-embossing-chemical-used" name="embossingChemicalUsed" min="0" step="any" value="0">
-                                <small class="form-hint">Coating weight this batch — stored locally; not counted against issued role RM</small>
-                            </div>
-                        </div>
-                        <div class="form-group" id="summary-sheets-group">
-                            <label for="summary-sheets-processed" id="summary-sheets-label">Quantity Processed (KGS) *</label>
-                            <input type="number" id="summary-sheets-processed" name="sheetsProcessed" required min="0" step="any" disabled>
-                        </div>
-                        <div class="form-group" id="summary-wasted-group">
-                            <label for="summary-wasted-sheets" id="summary-wasted-label">Wasted Quantity (KGS) *</label>
-                            <input type="number" id="summary-wasted-sheets" name="wastedSheets" required min="0" disabled>
-                            <small class="form-hint" id="summary-wasted-hint" style="display: none;">Auto: (Role + Chemical) − Actual Output</small>
-                        </div>
-                        <div class="form-group" id="summary-speed-group">
-                            <label id="summary-speed-label">Machine Speed</label>
-                            <div style="color: var(--text-muted); font-size: 0.85rem; padding: 8px 0;">Removed</div>
-                        </div>
-                        <div class="form-group">
-                            <label for="summary-remarks">Remarks</label>
-                            <textarea id="summary-remarks" name="remarks" rows="4" placeholder="Optional remarks..." disabled></textarea>
-                        </div>
-                        <div class="form-group" id="summary-packing-group" style="display: none;">
-                            <label for="summary-packing-details">Packing Qty *</label>
-                            <input type="number" id="summary-packing-details" name="packingDetails" min="0" placeholder="e.g. 50" disabled>
-                        </div>
-                        
-                        <!-- Auto-Issue Results (shown after job completion) -->
-                        <div id="autoIssueResults" style="display: none; margin: 15px 0;"></div>
-                        
-                        <div class="modal-actions">
-                            <button type="button" class="btn-secondary" id="summary-back-btn">Back</button>
-                            <button type="button" class="btn-primary" id="summary-confirm-btn">Confirm</button>
-                        </div>
+                    <h3 class="summary-section-title">Production Overview</h3>
+                    <div id="summary-production-overview" class="process-label-preview-host" style="display: none;"></div>
+                    <form id="job-summary-form" style="display: none;">
+                        <input type="hidden" id="summary-sheets-processed" name="sheetsProcessed" value="0">
+                        <input type="hidden" id="summary-wasted-sheets" name="wastedSheets" value="0">
+                        <input type="hidden" id="summary-remarks" name="remarks" value="">
+                        <input type="hidden" id="summary-embossing-chemical-used" value="0">
+                        <div id="autoIssueResults" style="display: none;"></div>
                     </form>
+                    <div class="form-group" id="summary-packing-group" style="display: none;">
+                        <label for="summary-packing-details">Packing Qty *</label>
+                        <input type="number" id="summary-packing-details" name="packingDetails" min="0" placeholder="e.g. 50" disabled>
+                    </div>
                 </div>
+            </div>
+            <div class="modal-actions page-footer-actions">
+                <button type="button" class="btn-secondary" id="summary-back-btn">Back</button>
+                <button type="button" class="btn-primary" id="summary-confirm-btn">Confirm</button>
             </div>
         </div>
     </div>

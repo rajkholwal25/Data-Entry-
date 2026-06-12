@@ -1,6 +1,42 @@
 // Enhanced interactivity for the Unit 1 (Holographic) Dashboard
 
 document.addEventListener('DOMContentLoaded', function() {
+    const machinesView = document.getElementById('unit-1-machines');
+    const traceView = document.getElementById('traceability-view');
+    const btnOpenTrace = document.getElementById('btn-open-trace');
+    const btnBackMachines = document.getElementById('btn-back-machines');
+    const pageTitle = document.getElementById('page-main-title');
+    const pageSubtitle = document.getElementById('page-subtitle');
+
+    function showTraceView() {
+        if (machinesView) machinesView.classList.add('hidden');
+        if (traceView) traceView.classList.remove('hidden');
+        if (btnOpenTrace) btnOpenTrace.classList.add('hidden');
+        if (pageTitle) pageTitle.textContent = 'Material Traceability';
+        if (pageSubtitle) pageSubtitle.textContent = 'Search by PO or batch number to trace inputs and outputs';
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        if (typeof window.traceabilityRunFromParams === 'function') {
+            window.traceabilityRunFromParams();
+        }
+    }
+
+    function showMachinesView() {
+        if (traceView) traceView.classList.add('hidden');
+        if (machinesView) machinesView.classList.remove('hidden');
+        if (btnOpenTrace) btnOpenTrace.classList.remove('hidden');
+        if (pageTitle) pageTitle.textContent = 'Unit 1 - Holographic';
+        if (pageSubtitle) pageSubtitle.textContent = 'Select a holographic process and machine to enter production data';
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    if (btnOpenTrace) btnOpenTrace.addEventListener('click', showTraceView);
+    if (btnBackMachines) btnBackMachines.addEventListener('click', showMachinesView);
+
+    const params = new URLSearchParams(location.search);
+    if (params.get('view') === 'trace' || params.get('po') || params.get('batch')) {
+        showTraceView();
+    }
+
     // Add ripple effect to machine items
     const machineItems = document.querySelectorAll('.machine-item');
     

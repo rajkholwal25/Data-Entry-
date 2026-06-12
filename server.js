@@ -44,8 +44,14 @@ const {
     recordMaterialIssues,
     recordMaterialIssueIfAbsent,
     linkOutputBatchToIssues,
-    getTraceabilityByPO,
-    getTraceabilityByOutputBatch
+    linkIssuesToOutputBatch,
+    getIssuedRolesWithRemaining,
+    getProcessInputsWithRemaining,
+    recordRoleBatchUsages,
+    getUnit1BatchNum,
+    getGenealogyByPO,
+    getGenealogyByOutputBatch,
+    getPOTraceabilitySummary
 } = require('./db-config');
 
 // Live tracking (operator shift sessions + live machine status/state)
@@ -69,20 +75,6 @@ const app = express();
 // Keep this bounded but above the default 100kb.
 app.use(express.json({ limit: process.env.EXPRESS_JSON_LIMIT || '15mb' }));
 app.use(cors()); // Enable CORS for frontend
-
-// Serve static files (HTML, CSS, JS) from the current directory
-app.use(express.static(path.join(__dirname), {
-    etag: false,
-    lastModified: false,
-    setHeaders: (res) => {
-        res.setHeader('Cache-Control', 'no-store, max-age=0');
-    }
-}));
-
-// Serve index.html at root
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
-});
 
 // SAP Business One Configuration
 const SAP_BASE_URL = process.env.SAP_BASE_URL || 'https://192.168.3.6:50000/b1s/v1';
@@ -533,6 +525,94 @@ function generateZPLLabel(data, boxNum, totalBoxes) {
 ^XZ
 `;
     return zpl;
+}
+
+/** Unit 1 process output label (embossing etc.) — output batch + input roles used. */
+function generateProcessZPLLabel(data) {
+    const dpmm = LABEL_PRINTER_CONFIG.dpi === 300 ? 12 : 8;
+    const labelWidthDots = LABEL_PRINTER_CONFIG.labelWidth * dpmm;
+    const labelHeightDots = LABEL_PRINTER_CONFIG.labelHeight * dpmm;
+    const truncate = (str, maxLen) => {
+        if (!str) return '';
+        const s = String(str);
+        return s.length > maxLen ? s.substring(0, maxLen - 2) + '..' : s;
+    };
+    const mapFO = (xMm, yMm) => {
+        const scale = Math.min(LABEL_PRINTER_CONFIG.labelHeight / 150, LABEL_PRINTER_CONFIG.labelWidth / 100);
+        const xs = xMm * scale;
+        const ys = yMm * scale;
+        const mm = (v) => Math.round(v * dpmm);
+        return `${mm(ys)},${mm(LABEL_PRINTER_CONFIG.labelHeight - xs)}`;
+    };
+    const po = truncate(data.poNumber || data.jobNo || '', 20);
+    const process = truncate(data.processName || 'Process', 18);
+    const batch = truncate(data.outputBatch || data.batchNo || '', 28);
+    const output = truncate(String(data.actualOutput ?? data.quantity ?? ''), 12);
+    const operator = truncate(data.operator || '', 22);
+    const roles = Array.isArray(data.rolesUsed) ? data.rolesUsed : [];
+    let roleLines = '';
+    let y = 52;
+    for (let i = 0; i < Math.min(roles.length, 5); i++) {
+        const r = roles[i];
+        const line = `${truncate(r.batch_number || r.batchNumber || '', 18)} ${Number(r.quantity_used || r.quantityUsed || 0)} KGS`;
+        roleLines += `^FO${mapFO(8, y)}^A0N,22,22^FD${truncate(line, 38)}^FS\n`;
+        y += 8;
+    }
+    if (roles.length > 5) {
+        roleLines += `^FO${mapFO(8, y)}^A0N,18,18^FD+${roles.length - 5} more roll(s)^FS\n`;
+    }
+    const padMm = 2.5;
+    const mm = (v) => Math.round(v * dpmm);
+    return `
+^XA
+^CI28
+^PW${labelWidthDots}
+^LL${labelHeightDots}
+^LH0,0
+^FW R
+^FO${mm(padMm)},${mm(padMm)}^GB${labelWidthDots - mm(padMm) * 2},${labelHeightDots - mm(padMm) * 2},3,B,28^FS
+^FO${mapFO(8, 8)}^A0N,36,36^FDPROCESS OUTPUT LABEL^FS
+^FO${mapFO(8, 18)}^A0N,24,24^FD${process}^FS
+^FO${mapFO(8, 28)}^A0N,26,26^FDPO: ${po}^FS
+^FO${mapFO(8, 38)}^A0N,26,26^FDOutput Batch:^FS
+^FO${mapFO(42, 38)}^A0N,28,28^FD${batch}^FS
+^FO${mapFO(8, 46)}^A0N,24,24^FDRoles Used:^FS
+${roleLines}
+^FO${mapFO(8, 88)}^A0N,26,26^FDOutput Qty: ${output} KGS^FS
+^FO${mapFO(8, 96)}^A0N,22,22^FDOperator: ${operator}^FS
+^FO${mapFO(8, 104)}^A0N,20,20^FD${data.packedOn || new Date().toLocaleDateString('en-IN')}^FS
+^XZ
+`;
+}
+
+async function printProcessLabel(labelData, numLabels = 1) {
+    const n = Math.max(1, Math.ceil(Number(numLabels) || 1));
+    if (!LABEL_PRINTER_CONFIG.enabled) {
+        return { success: false, message: 'Auto-printing is disabled', printed: 0 };
+    }
+    const jobName = `PROC-${String(labelData?.poNumber || 'label')}`.replace(/[^\w.-]+/g, '_');
+    let printedCount = 0;
+    const errors = [];
+    for (let i = 1; i <= n; i++) {
+        try {
+            const printData = generateProcessZPLLabel(labelData);
+            if (LABEL_CUPS_RAW_QUEUE && CUPS_PRINTER_NAME && process.platform !== 'win32') {
+                await printRawBufferViaCups(printData, jobName);
+            } else {
+                await sendToPrinter(printData);
+            }
+            printedCount++;
+        } catch (err) {
+            errors.push({ label: i, error: err.message });
+        }
+    }
+    return {
+        success: printedCount > 0,
+        message: `${printedCount}/${n} process label(s) printed`,
+        printed: printedCount,
+        total: n,
+        errors: errors.length ? errors : null
+    };
 }
 
 // ---------- HTML master-template auto-print (image -> ZPL) ----------
@@ -3995,6 +4075,17 @@ async function issueToNextProcessFIFO(params) {
 
         console.log(`✅ FIFO issue successful! DocEntry: ${result?.DocEntry}`);
 
+        await recordAutoIssueAllocationsToPO({
+            poNum: nextPODocNumber,
+            absoluteEntry: nextPOAbsoluteEntry,
+            lineNumber: baseLine,
+            itemCode,
+            warehouse: warehouseCode,
+            allocations: [{ batchNumber, quantity: quantityToIssue }],
+            sapDocEntry: result?.DocEntry,
+            remarks: remarks || `Auto-issue to PO ${nextPODocNumber}`
+        });
+
         return {
             success: true,
             totalIssued: quantityToIssue,
@@ -4133,6 +4224,17 @@ async function reconcileAutoIssueGap(params) {
 
         console.log(`   📤 Reconcile issue: ${quantityToIssue} to PO ${nextPO.documentNumber} (${allocations.length} batch(es))`);
         const result = await sapPostRequest('/InventoryGenExits', sapPayload);
+
+        await recordAutoIssueAllocationsToPO({
+            poNum: nextPO.documentNumber,
+            absoluteEntry: nextPO.absoluteEntry,
+            lineNumber: nextPO.targetLine.lineNumber,
+            itemCode: finishedItemCode,
+            warehouse: warehouseCode,
+            allocations,
+            sapDocEntry: result?.DocEntry,
+            remarks: remarks || `Auto-issue reconcile from PO ${sourceDocNumber || sourcePO.DocumentNumber}`
+        });
 
         return {
             success: true,
@@ -5259,7 +5361,7 @@ app.get('/api/validate/config', (req, res) => {
  * in SAP), linking them to the produced output batch. Best-effort, non-blocking.
  */
 async function backfillIssuedRollsFromSAP({ absoluteEntry, poNum, outputBatch, operator, machine }) {
-    if (!absoluteEntry || !outputBatch) return 0;
+    if (!absoluteEntry) return 0;
     const ae = Number(absoluteEntry);
 
     // Try linked-document filter first (most reliable), fall back to comment match.
@@ -5339,7 +5441,6 @@ async function backfillIssuedRollsFromSAP({ absoluteEntry, poNum, outputBatch, o
                         operator_name: operator || null,
                         machine_name: machine || null,
                         sap_doc_entry: doc.DocEntry,
-                        output_batch: outputBatch,
                         remarks: 'Backfilled from SAP goods issue'
                     });
                     if (id) recorded++;
@@ -5357,15 +5458,75 @@ async function backfillIssuedRollsFromSAP({ absoluteEntry, poNum, outputBatch, o
                     operator_name: operator || null,
                     machine_name: machine || null,
                     sap_doc_entry: doc.DocEntry,
-                    output_batch: outputBatch,
                     remarks: 'Backfilled from SAP goods issue (non-batch)'
                 });
                 if (id) recorded++;
             }
         }
     }
-    console.log(`   🧬 Traceability backfill: recorded ${recorded} roll(s) for output batch ${outputBatch} (PO ${poNum})`);
+    console.log(`   🧬 Traceability backfill: recorded ${recorded} roll(s) for PO ${poNum}${outputBatch ? ` → ${outputBatch}` : ''}`);
     return recorded;
+}
+
+/** Record SAP auto-issue allocations into material_issue_log for the target PO (754 ← 753 outputs). */
+async function recordAutoIssueAllocationsToPO({
+    poNum,
+    absoluteEntry,
+    lineNumber,
+    itemCode,
+    warehouse,
+    allocations,
+    sapDocEntry,
+    remarks
+}) {
+    if (!poNum || !Array.isArray(allocations) || allocations.length === 0) return 0;
+    try {
+        return await recordMaterialIssues(
+            {
+                po_num: String(poNum),
+                absolute_entry: absoluteEntry != null ? Number(absoluteEntry) : null,
+                line_number: lineNumber != null ? Number(lineNumber) : null,
+                item_code: itemCode || null,
+                warehouse: warehouse || null,
+                sap_doc_entry: sapDocEntry != null ? String(sapDocEntry) : null,
+                remarks: remarks || 'Auto-issue to next process'
+            },
+            allocations
+        );
+    } catch (e) {
+        console.warn('⚠️ recordAutoIssueAllocationsToPO failed (non-blocking):', e.message);
+        return 0;
+    }
+}
+
+/**
+ * Backfill material_issue_log for a PO from SAP goods issues (inputs issued before/at run).
+ */
+async function ensurePOInputsBackfillFromSAP(poNum) {
+    const po = String(poNum || '').trim();
+    if (!po) return { recorded: 0, absoluteEntry: null };
+
+    const poResp = await sapGetRequest(
+        `/ProductionOrders?$filter=DocumentNumber eq ${po}&$select=AbsoluteEntry,DocumentNumber,ItemNo,U_PCode&$top=1`
+    );
+    const row = poResp?.value?.[0];
+    const absoluteEntry = row?.AbsoluteEntry;
+    if (!absoluteEntry) {
+        return { recorded: 0, absoluteEntry: null, notFound: true };
+    }
+
+    const recorded = await backfillIssuedRollsFromSAP({
+        absoluteEntry,
+        poNum: po,
+        outputBatch: null
+    });
+
+    return {
+        recorded,
+        absoluteEntry,
+        fgItemCode: row.ItemNo || null,
+        processTag: getUnit1ProcessBatchTag(row.U_PCode, null, null, row.ItemNo)
+    };
 }
 
 /**
@@ -5552,19 +5713,21 @@ app.post('/api/job-complete', async (req, res) => {
 
         const result = await insertJobActivities(jobData, activities);
 
-        // Traceability: link app-captured input rolls + backfill consumed batches from SAP
-        if (result?.batch_num) {
-            await linkOutputBatchToIssues(jobData.po_num, result.batch_num);
+        // Report completion inputs → role_batch_usage (authoritative traceability link)
+        if (result?.batch_num && Array.isArray(jobData.role_usages) && jobData.role_usages.length > 0) {
             try {
-                await backfillIssuedRollsFromSAP({
-                    absoluteEntry: jobData.absolute_entry,
-                    poNum: jobData.po_num,
-                    outputBatch: result.batch_num,
-                    operator: jobData.operator_name,
-                    machine: jobData.machine_name
-                });
-            } catch (traceErr) {
-                console.warn('⚠️ Traceability backfill error (non-blocking):', traceErr.message);
+                const recorded = await recordRoleBatchUsages(
+                    jobData.po_num,
+                    result.batch_num,
+                    jobData.role_usages,
+                    {
+                        operator_name: jobData.operator_name || null,
+                        machine_name: jobData.machine_name || null
+                    }
+                );
+                console.log(`   ✅ Recorded ${recorded} input usage row(s) → output batch ${result.batch_num}`);
+            } catch (usageErr) {
+                console.warn('⚠️ role_batch_usage save failed (non-blocking):', usageErr.message);
             }
         }
 
@@ -6599,9 +6762,107 @@ app.post('/api/release-production-order', async (req, res) => {
 });
 
 /**
+ * GET /api/traceability/by-po/:poNum
+ * PO summary: all input batches used + all output batches produced (report completion).
+ */
+app.get('/api/traceability/by-po/:poNum', async (req, res) => {
+    try {
+        const poNum = String(req.params.poNum || '').trim();
+        if (!poNum) {
+            return res.status(400).json({ success: false, message: 'PO number is required' });
+        }
+        let fgItemCode = null;
+        let processTag = null;
+        try {
+            const backfill = await ensurePOInputsBackfillFromSAP(poNum);
+            fgItemCode = backfill.fgItemCode || null;
+            processTag = backfill.processTag || null;
+        } catch (bfErr) {
+            console.warn(`Traceability SAP input backfill skipped for PO ${poNum}:`, bfErr.message);
+        }
+        const summary = await getPOTraceabilitySummary(poNum, { fgItemCode, processTag });
+        return res.json({ success: true, mode: 'po', ...summary });
+    } catch (error) {
+        console.error('Traceability by-PO error:', error.message);
+        return res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+/**
+ * GET /api/traceability/by-batch/:batchNum
+ * Reverse trace one output batch → inputs selected at report completion.
+ */
+app.get('/api/traceability/by-batch/:batchNum', async (req, res) => {
+    try {
+        const batchNum = String(req.params.batchNum || '').trim();
+        if (!batchNum) {
+            return res.status(400).json({ success: false, message: 'Batch number is required' });
+        }
+        const inputs = await getGenealogyByOutputBatch(batchNum);
+        let poNum = inputs[0]?.po_num || null;
+        let outputQty = null;
+        let itemCode = null;
+        try {
+            const [prodRows] = await pool.query(
+                `SELECT po_num, quantity_processed, fg_num FROM production_records WHERE batch_num = ? LIMIT 1`,
+                [batchNum]
+            );
+            if (prodRows[0]) {
+                poNum = poNum || prodRows[0].po_num;
+                outputQty = Number(prodRows[0].quantity_processed) || null;
+                itemCode = prodRows[0].fg_num;
+            }
+        } catch (_) { /* non-blocking */ }
+        const totalInputQty = inputs.reduce((s, r) => s + (Number(r.quantity) || 0), 0);
+
+        let inputMeta = new Map();
+        if (poNum) {
+            let fgItemCode = itemCode || null;
+            let processTag = null;
+            try {
+                const backfill = await ensurePOInputsBackfillFromSAP(poNum);
+                fgItemCode = backfill.fgItemCode || fgItemCode;
+                processTag = backfill.processTag || null;
+            } catch (_) { /* non-blocking */ }
+            const summary = await getPOTraceabilitySummary(poNum, { fgItemCode, processTag });
+            inputMeta = new Map((summary.inputBatches || []).map((b) => [b.batchNumber, b]));
+        }
+
+        return res.json({
+            success: true,
+            mode: 'batch',
+            outputBatch: batchNum,
+            poNum,
+            outputQty,
+            itemCode,
+            count: inputs.length,
+            totalInputQty,
+            inputs: inputs.map((r) => {
+                const meta = inputMeta.get(r.batch_number) || {};
+                return {
+                    itemCode: r.item_code,
+                    batchNumber: r.batch_number,
+                    quantity: r.quantity,
+                    issuedQty: meta.issuedQty != null ? meta.issuedQty : null,
+                    remainingQty: meta.remainingQty != null ? meta.remainingQty : null,
+                    sourcePoNum: meta.sourcePoNum || null,
+                    inputType: r.input_type || 'raw_roll',
+                    warehouse: r.warehouse,
+                    operator: r.operator_name,
+                    machine: r.machine_name,
+                    usedAt: r.used_at
+                };
+            })
+        });
+    } catch (error) {
+        console.error('Traceability by-batch error:', error.message);
+        return res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+/**
  * GET /api/traceability/:po
- * Returns input rolls/batches issued for a PO, grouped by produced output batch.
- * Optional ?batch=OUTPUT-BATCH to reverse-trace a specific output batch.
+ * Legacy — prefer /api/traceability/by-po/:poNum or /api/traceability/by-batch/:batchNum
  */
 app.get('/api/traceability/:po', async (req, res) => {
     try {
@@ -6610,37 +6871,25 @@ app.get('/api/traceability/:po', async (req, res) => {
         const noAuto = String(req.query.noAuto || '') === '1';
 
         let rows = outputBatch
-            ? await getTraceabilityByOutputBatch(outputBatch)
-            : await getTraceabilityByPO(poNum);
+            ? await getGenealogyByOutputBatch(outputBatch)
+            : await getGenealogyByPO(poNum);
 
-        // Auto-pull from SAP the first time a PO is traced (no local rows yet).
-        if (!outputBatch && rows.length === 0 && !noAuto) {
-            try {
-                const ensured = await ensureTraceabilityForPO(poNum);
-                if (ensured.recorded > 0) {
-                    rows = await getTraceabilityByPO(poNum);
-                }
-            } catch (autoErr) {
-                console.warn(`⚠️ Auto-traceability for PO ${poNum} failed:`, autoErr.message);
-            }
-        }
-
-        // Group issued rolls under their output batch (unlinked → "pending")
+        // Group consumed inputs under their output batch (from report completion only)
         const groups = {};
         for (const r of rows) {
-            const key = r.output_batch || '__pending__';
+            const key = r.output_batch || outputBatch || '__pending__';
             if (!groups[key]) {
-                groups[key] = { outputBatch: r.output_batch || null, inputs: [], totalQty: 0 };
+                groups[key] = { outputBatch: r.output_batch || outputBatch || null, inputs: [], totalQty: 0 };
             }
             groups[key].inputs.push({
                 itemCode: r.item_code,
                 batchNumber: r.batch_number,
                 quantity: Number(r.quantity) || 0,
+                inputType: r.input_type || 'raw_roll',
                 warehouse: r.warehouse,
-                lineNumber: r.line_number,
                 operator: r.operator_name,
                 machine: r.machine_name,
-                sapDocEntry: r.sap_doc_entry,
+                usedAt: r.used_at,
                 issuedAt: r.issued_at
             });
             groups[key].totalQty += Number(r.quantity) || 0;
@@ -6768,6 +7017,17 @@ app.post('/api/auto-issue-material', async (req, res) => {
 
         const issueResult = await sapPostRequest('/InventoryGenExits', linkedPayload);
         console.log(`   ✅ Auto-issued ${issuedQty} (${allocations.length} batch(es)), shortfall ${shortfall}`);
+
+        await recordAutoIssueAllocationsToPO({
+            poNum: documentNumber || absEntry,
+            absoluteEntry: absEntry,
+            lineNumber: resolvedLineNumber,
+            itemCode: code,
+            warehouse: wh,
+            allocations,
+            sapDocEntry: issueResult?.DocEntry,
+            remarks: `Auto-issue FIFO via Data Entry (PO ${documentNumber || absEntry})`
+        });
 
         res.json({
             success: true,
@@ -8298,6 +8558,96 @@ app.post('/api/fg-entry', async (req, res) => {
  * POST /api/fg-print-labels
  * Print FG labels (after preview or reprint).
  */
+/**
+ * GET /api/po/:poNum/issued-roles
+ * Issued input rolls with remaining qty for report completion.
+ */
+app.get('/api/po/:poNum/issued-roles', async (req, res) => {
+    try {
+        const poNum = String(req.params.poNum || '').trim();
+        if (!poNum) {
+            return res.status(400).json({ error: 'poNum is required' });
+        }
+        const processTag = String(req.query.process_tag || req.query.process || 'EMB').trim().toUpperCase();
+        const roles = await getProcessInputsWithRemaining(poNum, processTag);
+        res.json({ success: true, poNum, processTag, roles });
+    } catch (error) {
+        console.error('❌ /api/po/:poNum/issued-roles:', error.message);
+        res.status(500).json({ error: 'Failed to load issued roles', message: error.message });
+    }
+});
+
+/**
+ * GET /api/po/:poNum/process-inputs
+ * Inputs for report completion: raw rolls (EMB) or previous-process batches (MET, etc.).
+ */
+app.get('/api/po/:poNum/process-inputs', async (req, res) => {
+    try {
+        const poNum = String(req.params.poNum || '').trim();
+        const processTag = String(
+            req.query.process_tag || req.query.process || req.query.u_p_code || 'EMB'
+        ).trim().toUpperCase();
+        if (!poNum) {
+            return res.status(400).json({ error: 'poNum is required' });
+        }
+        const fgItemCode = String(req.query.fg_num || req.query.fgItemCode || req.query.item_no || '').trim() || null;
+        const resolvedTag = processTag.length <= 4
+            ? processTag
+            : getUnit1ProcessBatchTag(processTag, null, null, fgItemCode);
+        const roles = await getProcessInputsWithRemaining(poNum, resolvedTag, fgItemCode);
+        res.json({ success: true, poNum, processTag: resolvedTag, roles });
+    } catch (error) {
+        console.error('❌ /api/po/:poNum/process-inputs:', error.message);
+        res.status(500).json({ error: 'Failed to load process inputs', message: error.message });
+    }
+});
+
+/**
+ * GET /api/peek-unit1-batch
+ * Preview next output batch number without saving.
+ */
+app.get('/api/peek-unit1-batch', async (req, res) => {
+    try {
+        const poNum = String(req.query.po_num || '').trim();
+        const fgNum = String(req.query.fg_num || req.query.item_no || '').trim();
+        const jobStart = req.query.job_start_time || null;
+        const uPCode = req.query.u_p_code || req.query.uPCode || '';
+        const machineName = req.query.machine_name || '';
+        if (!fgNum) {
+            return res.status(400).json({ error: 'fg_num is required' });
+        }
+        const processTag = getUnit1ProcessBatchTag(uPCode, null, machineName, fgNum);
+        let sapMaxSeq = 0;
+        try {
+            sapMaxSeq = await getSapMaxItemBatchSeq(fgNum, processTag);
+        } catch (_) { /* non-blocking */ }
+        const batchNum = await getUnit1BatchNum(fgNum, processTag, poNum, jobStart, sapMaxSeq);
+        res.json({ success: true, batch_num: batchNum, process_tag: processTag });
+    } catch (error) {
+        console.error('❌ /api/peek-unit1-batch:', error.message);
+        res.status(500).json({ error: 'Failed to peek batch', message: error.message });
+    }
+});
+
+/**
+ * POST /api/process-print-labels
+ * Print process output label (embossing batch + roles used).
+ */
+app.post('/api/process-print-labels', async (req, res) => {
+    try {
+        const { labelData, numLabels } = req.body || {};
+        const n = Math.ceil(Number(numLabels) || 1);
+        if (!labelData || typeof labelData !== 'object') {
+            return res.status(400).json({ error: 'labelData object is required' });
+        }
+        const printResult = await printProcessLabel(labelData, n);
+        res.json({ success: printResult.success, printResult });
+    } catch (error) {
+        console.error('❌ /api/process-print-labels:', error.message);
+        res.status(500).json({ error: 'Print failed', message: error.message });
+    }
+});
+
 app.post('/api/fg-print-labels', async (req, res) => {
     try {
         const { labelData, numLabels } = req.body || {};
@@ -8386,8 +8736,21 @@ process.on('SIGTERM', async () => {
     process.exit(0);
 });
 
+// Static files last — so /api/* routes always return JSON, not HTML assets
+app.use(express.static(path.join(__dirname), {
+    etag: false,
+    lastModified: false,
+    setHeaders: (res) => {
+        res.setHeader('Cache-Control', 'no-store, max-age=0');
+    }
+}));
+
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
 // Start server
-app.listen(PORT, async () => {
+const httpServer = app.listen(PORT, async () => {
     console.log(`\n🚀 SAP Business One API Server running on port ${PORT}`);
     console.log(`📡 SAP Base URL: ${SAP_BASE_URL}`);
     console.log(`🏢 Company DB: ${SAP_COMPANY_DB}`);
@@ -8426,6 +8789,9 @@ app.listen(PORT, async () => {
     console.log(`  GET  /api/activities/machine/:machineName/date/:date`);
     console.log(`  PUT  /api/batch/:batchNum`);
     console.log(`  GET  /api/best-performance/:fgNum`);
+    console.log(`\nTraceability endpoints:`);
+    console.log(`  GET  /api/traceability/by-po/:poNum`);
+    console.log(`  GET  /api/traceability/by-batch/:batchNum`);
     console.log(`\nLive tracking endpoints:`);
     console.log(`  POST /api/live/login            (machineId, operator, ...)`);
     console.log(`  POST /api/live/logout           (machineId, reason)`);
@@ -8436,4 +8802,16 @@ app.listen(PORT, async () => {
     console.log(`  GET  /api/live/dashboard`);
     console.log(`  GET  /api/live/sessions?date=&shift=&machineId=`);
     console.log(`  GET  /api/live/state-history?machineId=&date=&shift=\n`);
+});
+
+httpServer.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+        console.error(`\n❌ Port ${PORT} is already in use (another server is still running).`);
+        console.error(`   Windows: netstat -ano | findstr :${PORT}`);
+        console.error(`   Then:    taskkill /PID <pid> /F`);
+        console.error(`   Or close the other terminal where npm start is running.\n`);
+    } else {
+        console.error('❌ Server failed to start:', err.message);
+    }
+    process.exit(1);
 });
