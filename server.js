@@ -52,6 +52,8 @@ const {
     getUnit1BatchNum,
     getGenealogyByPO,
     getGenealogyByOutputBatch,
+    getOutputBatchOwnerPO,
+    outputBatchBelongsToPO,
     getPOTraceabilitySummary
 } = require('./db-config');
 
@@ -6791,33 +6793,85 @@ app.get('/api/traceability/by-po/:poNum', async (req, res) => {
 });
 
 /**
- * GET /api/traceability/by-batch/:batchNum
- * Reverse trace one output batch → inputs selected at report completion.
+ * GET /api/traceability/batch-owner/:batchNum
+ * Which PO produced this output batch (for batch trace PO field).
  */
-app.get('/api/traceability/by-batch/:batchNum', async (req, res) => {
+app.get('/api/traceability/batch-owner/:batchNum', async (req, res) => {
     try {
         const batchNum = String(req.params.batchNum || '').trim();
         if (!batchNum) {
             return res.status(400).json({ success: false, message: 'Batch number is required' });
         }
-        const inputs = await getGenealogyByOutputBatch(batchNum);
-        let poNum = inputs[0]?.po_num || null;
+        const owner = await getOutputBatchOwnerPO(batchNum);
+        if (!owner?.poNum) {
+            return res.status(404).json({
+                success: false,
+                message: `No output batch found: ${batchNum}`
+            });
+        }
+        return res.json({
+            success: true,
+            batchNum,
+            ownerPo: owner.poNum,
+            processName: owner.processName
+        });
+    } catch (error) {
+        console.error('Traceability batch-owner error:', error.message);
+        return res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+/**
+ * GET /api/traceability/by-batch/:batchNum?po=753
+ * Reverse trace one output batch → inputs selected at report completion.
+ * PO is required — batch numbers may repeat across different POs.
+ */
+app.get('/api/traceability/by-batch/:batchNum', async (req, res) => {
+    try {
+        const batchNum = String(req.params.batchNum || '').trim();
+        const poNum = String(req.query.po || req.query.po_num || '').trim();
+        if (!batchNum) {
+            return res.status(400).json({ success: false, message: 'Batch number is required' });
+        }
+        if (!poNum) {
+            return res.status(400).json({
+                success: false,
+                message: 'Please enter PO — batch trace requires PO number and batch number together.'
+            });
+        }
+        const owner = await getOutputBatchOwnerPO(batchNum);
+        if (!owner?.poNum) {
+            return res.status(404).json({
+                success: false,
+                message: `No output batch found: ${batchNum}`
+            });
+        }
+        if (owner.poNum !== poNum) {
+            const procHint = owner.processName ? ` (${owner.processName})` : '';
+            return res.status(404).json({
+                success: false,
+                message: `This batch belongs to PO ${owner.poNum}${procHint}, not PO ${poNum}. Use PO ${owner.poNum} to trace ${batchNum}.`,
+                ownerPo: owner.poNum,
+                processName: owner.processName,
+                batchNum
+            });
+        }
+        await backfillRoleBatchUsageOperators(poNum);
+        const inputs = await getGenealogyByOutputBatch(batchNum, poNum);
         let outputQty = null;
         let itemCode = null;
         let completionOperator = null;
         let completionMachine = null;
         try {
-            if (poNum) await backfillRoleBatchUsageOperators(poNum);
             const [prodRows] = await pool.query(
-                `SELECT po_num, quantity_processed, fg_num, operator_name, machine_name
+                `SELECT quantity_processed, fg_num, operator_name, machine_name
                    FROM production_records
-                  WHERE batch_num = ?
+                  WHERE batch_num = ? AND po_num = ?
                   ORDER BY job_end_time DESC NULLS LAST
                   LIMIT 1`,
-                [batchNum]
+                [batchNum, poNum]
             );
             if (prodRows[0]) {
-                poNum = poNum || prodRows[0].po_num;
                 outputQty = Number(prodRows[0].quantity_processed) || null;
                 itemCode = prodRows[0].fg_num;
                 completionOperator = prodRows[0].operator_name || null;

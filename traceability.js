@@ -2,7 +2,9 @@
 
 (function initTraceability() {
     const poInput = document.getElementById('trace-po-input');
+    const batchPoInput = document.getElementById('trace-batch-po-input');
     const batchInput = document.getElementById('trace-batch-input');
+    const batchHintEl = document.getElementById('trace-batch-hint');
     const statusEl = document.getElementById('trace-status');
     const resultsEl = document.getElementById('trace-results');
     const poSummaryEl = document.getElementById('trace-po-summary');
@@ -60,6 +62,9 @@
         });
         document.getElementById('trace-panel-po').classList.toggle('active', mode === 'po');
         document.getElementById('trace-panel-batch').classList.toggle('active', mode === 'batch');
+        if (batchHintEl) {
+            batchHintEl.style.display = mode === 'batch' ? '' : 'none';
+        }
         poSummaryEl.classList.remove('visible');
         resultsEl.innerHTML = '';
         statusEl.textContent = '';
@@ -194,14 +199,41 @@
             a.addEventListener('click', (e) => {
                 e.preventDefault();
                 const bn = a.dataset.batch;
-                if (bn) openBatchSearch(bn);
+                if (bn) openBatchSearch(bn, poData?.poNum);
             });
         });
     }
 
-    function openBatchSearch(batchNum) {
+    async function suggestBatchOwnerPO() {
+        const batch = batchInput?.value.trim();
+        if (!batch || !batchPoInput) return;
+        try {
+            const json = await fetchJson(`/api/traceability/batch-owner/${encodeURIComponent(batch)}`);
+            if (json.ownerPo) {
+                const current = batchPoInput.value.trim();
+                if (!current) {
+                    batchPoInput.value = json.ownerPo;
+                    statusEl.textContent = `Batch ${batch} belongs to PO ${json.ownerPo}${json.processName ? ` (${json.processName})` : ''} — PO filled automatically.`;
+                } else if (current !== json.ownerPo) {
+                    statusEl.textContent = `❌ This batch belongs to PO ${json.ownerPo}${json.processName ? ` (${json.processName})` : ''}, not PO ${current}.`;
+                    resultsEl.innerHTML = '';
+                }
+            }
+        } catch (_) { /* unknown batch — ignore until search */ }
+    }
+
+    function openBatchSearch(batchNum, poNum) {
         setMode('batch');
+        const po = String(poNum || poData?.poNum || poInput?.value || '').trim();
+        if (batchPoInput) batchPoInput.value = po;
         batchInput.value = batchNum;
+        if (!po) {
+            statusEl.textContent = '⚠️ Please enter PO — batch trace needs PO number and batch number together.';
+            resultsEl.innerHTML = '';
+            poSummaryEl.classList.remove('visible');
+            batchPoInput?.focus();
+            return;
+        }
         runBatchSearch();
     }
 
@@ -232,27 +264,63 @@
 
     async function runBatchSearch() {
         const batch = batchInput.value.trim();
-        if (!batch) {
-            statusEl.textContent = 'Enter an output batch number.';
+        const po = batchPoInput?.value.trim() || '';
+        if (!po) {
+            statusEl.textContent = '⚠️ Please enter PO — batch trace needs PO number and batch number together.';
+            batchPoInput?.focus();
             return;
         }
+        if (!batch) {
+            statusEl.textContent = 'Enter an output batch number.';
+            batchInput?.focus();
+            return;
+        }
+
+        // Resolve owning PO before search — batch must match the PO that produced it
+        let ownerPo = null;
+        let ownerProcess = null;
+        try {
+            const ownerJson = await fetchJson(`/api/traceability/batch-owner/${encodeURIComponent(batch)}`);
+            ownerPo = ownerJson.ownerPo || null;
+            ownerProcess = ownerJson.processName || null;
+        } catch (_) {
+            /* batch-owner API unavailable on older server — validated after by-batch */
+        }
+        if (ownerPo && ownerPo !== po) {
+            const procHint = ownerProcess ? ` (${ownerProcess})` : '';
+            statusEl.textContent = `❌ This batch belongs to PO ${ownerPo}${procHint}, not PO ${po}. Use PO ${ownerPo} to trace this batch.`;
+            resultsEl.innerHTML = '';
+            batchPoInput.value = ownerPo;
+            batchPoInput?.focus();
+            return;
+        }
+
         statusEl.textContent = 'Loading…';
         resultsEl.innerHTML = '';
         poSummaryEl.classList.remove('visible');
         try {
-            const json = await fetchJson(`/api/traceability/by-batch/${encodeURIComponent(batch)}`);
+            const qs = new URLSearchParams({ po: ownerPo || po });
+            const json = await fetchJson(
+                `/api/traceability/by-batch/${encodeURIComponent(batch)}?${qs}`
+            );
             if (!json.success) throw new Error(json.message || 'Failed');
+            if (json.poNum && String(json.poNum) !== String(po)) {
+                throw new Error(
+                    `This batch belongs to PO ${json.poNum}, not PO ${po}. Use PO ${json.poNum} to trace this batch.`
+                );
+            }
+            const resolvedPo = json.poNum || ownerPo || po;
             const inputs = json.inputs || [];
             statusEl.textContent = inputs.length
-                ? `${inputs.length} input(s) used to produce ${batch}`
-                : `No report-completion inputs found for ${batch}. Finish job with input selection.`;
+                ? `PO ${resolvedPo}: ${inputs.length} input(s) used to produce ${batch}`
+                : `PO ${resolvedPo}: no report-completion inputs linked for ${batch}. Finish job with input selection.`;
 
             const hero = `
                 <div class="trace-batch-hero">
                     <div class="trace-hero-title">Output Batch</div>
                     <div class="trace-hero-batch-id">${esc(json.outputBatch)}</div>
                     <div class="trace-hero-meta">
-                        ${json.poNum ? `PO ${esc(json.poNum)}` : ''}
+                        ${resolvedPo ? `PO ${esc(resolvedPo)}` : ''}
                         ${json.outputQty != null ? ` · Output: <strong>${json.outputQty} KGS</strong>` : ''}
                         ${json.itemCode ? ` · Item: ${esc(json.itemCode)}` : ''}
                         ${json.completionOperator ? ` · Operator: <strong>${esc(json.completionOperator)}</strong>${json.completionMachine ? ` (${esc(json.completionMachine)})` : ''}` : ''}
@@ -294,12 +362,15 @@
     document.getElementById('trace-search-po-btn').addEventListener('click', runPOSearch);
     document.getElementById('trace-search-batch-btn').addEventListener('click', runBatchSearch);
     poInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runPOSearch(); });
+    batchInput?.addEventListener('blur', () => { suggestBatchOwnerPO(); });
+    batchPoInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') runBatchSearch(); });
     batchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runBatchSearch(); });
 
     window.traceabilityRunFromParams = function runFromParams() {
         const params = new URLSearchParams(location.search);
         if (params.get('batch')) {
             setMode('batch');
+            if (batchPoInput) batchPoInput.value = params.get('po') || '';
             batchInput.value = params.get('batch');
             runBatchSearch();
         } else if (params.get('po')) {

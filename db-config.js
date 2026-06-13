@@ -1320,10 +1320,52 @@ async function linkIssuesToOutputBatch(issueIds, outputBatch) {
     return result.affectedRows || 0;
 }
 
+/** PO that produced this output batch (report completion on that PO). */
+async function getOutputBatchOwnerPO(outputBatch) {
+    const batch = String(outputBatch || '').trim();
+    if (!batch) return null;
+    const [prodRows] = await pool.query(
+        `SELECT po_num, process_name
+           FROM production_records
+          WHERE batch_num = ?
+          ORDER BY job_end_time DESC NULLS LAST, unique_id DESC
+          LIMIT 1`,
+        [batch]
+    );
+    if (prodRows[0]?.po_num) {
+        return {
+            poNum: String(prodRows[0].po_num).trim(),
+            processName: prodRows[0].process_name || null
+        };
+    }
+    const [rbuRows] = await pool.query(
+        `SELECT po_num FROM role_batch_usage
+          WHERE output_batch = ?
+          GROUP BY po_num
+          ORDER BY MAX(created_at) DESC NULLS LAST
+          LIMIT 1`,
+        [batch]
+    );
+    if (rbuRows[0]?.po_num) {
+        return { poNum: String(rbuRows[0].po_num).trim(), processName: null };
+    }
+    return null;
+}
+
+/** True only when this output batch was produced on the given PO. */
+async function outputBatchBelongsToPO(poNum, outputBatch) {
+    const owner = await getOutputBatchOwnerPO(outputBatch);
+    if (!owner?.poNum) return false;
+    return String(poNum || '').trim() === owner.poNum;
+}
+
 /** Inputs consumed to produce an output batch (from report completion only). */
-async function getGenealogyByOutputBatch(outputBatch) {
+async function getGenealogyByOutputBatch(outputBatch, poNum = null) {
     const batch = String(outputBatch || '').trim();
     if (!batch) return [];
+    const po = poNum != null ? String(poNum).trim() : '';
+    const params = po ? [batch, po] : [batch];
+    const poClause = po ? ' AND rbu.po_num = ?' : '';
     const [rows] = await pool.query(
         `SELECT rbu.usage_id,
                 rbu.po_num,
@@ -1345,9 +1387,9 @@ async function getGenealogyByOutputBatch(outputBatch) {
                   ON mil.issue_id = rbu.issue_id
            LEFT JOIN (${PR_COMPLETION_SUBQUERY}) pr_out
                   ON pr_out.batch_num = rbu.output_batch
-          WHERE rbu.output_batch = ?
+          WHERE rbu.output_batch = ?${poClause}
           ORDER BY rbu.created_at ASC, rbu.usage_id ASC`,
-        [batch]
+        params
     );
     return rows.map((r) => ({
         output_batch: batch,
@@ -1841,6 +1883,8 @@ module.exports = {
     resolveCompletionOperatorMeta,
     getGenealogyByPO,
     getGenealogyByOutputBatch,
+    getOutputBatchOwnerPO,
+    outputBatchBelongsToPO,
     getPOTraceabilitySummary,
     getTraceabilityByPO,
     getTraceabilityByOutputBatch,

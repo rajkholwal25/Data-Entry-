@@ -611,6 +611,18 @@ body {
   display: flex;
 }
 
+.trace-batch-hint {
+  display: none;
+  margin: -8px 0 16px;
+  font-size: 0.8125rem;
+  color: var(--text-muted);
+}
+
+.trace-search-panel-batch input#trace-batch-po-input {
+  flex: 0 1 140px;
+  min-width: 120px;
+}
+
 .trace-search-panel input {
   flex: 1;
   min-width: 200px;

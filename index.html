@@ -35,7 +35,7 @@
             <h2 class="trace-title">🧬 Material Traceability</h2>
             <p class="trace-sub">
                 Links come from <strong>report completion</strong> (Finish Job → inputs you selected + qty used).
-                PO search lists all inputs/outputs for a job. Batch search shows what was used to make one output batch.
+                PO search lists all inputs/outputs for a job. Batch search needs <strong>PO + batch number</strong> together (batch IDs can repeat across POs).
             </p>
 
             <div class="trace-mode-tabs">
@@ -48,10 +48,12 @@
                 <button type="button" class="trace-btn-primary" id="trace-search-po-btn">Search PO</button>
             </div>
 
-            <div class="trace-search-panel" id="trace-panel-batch">
-                <input id="trace-batch-input" type="text" placeholder="Output batch (e.g. PET-45-1001-HF-EMB-001)" />
+            <div class="trace-search-panel trace-search-panel-batch" id="trace-panel-batch">
+                <input id="trace-batch-po-input" type="text" inputmode="numeric" placeholder="PO Number (required)" aria-label="PO number for batch trace" />
+                <input id="trace-batch-input" type="text" placeholder="Output batch (e.g. PET-45-1001-HF-SLT-002)" aria-label="Output batch number" />
                 <button type="button" class="trace-btn-primary" id="trace-search-batch-btn">Search Batch</button>
             </div>
+            <p class="trace-batch-hint" id="trace-batch-hint">Batch trace: enter output batch — PO auto-fills from the job that produced it (e.g. SLT-002 → PO 755, not 753).</p>
 
             <div class="trace-status" id="trace-status"></div>
 
@@ -208,7 +210,7 @@
     </div>
 
     <script src="index.js"></script>
-    <script src="traceability.js"></script>
+    <script src="traceability.js?v=20260613a"></script>
 </body>
 
 </html>
