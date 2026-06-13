@@ -4990,6 +4990,15 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                 batchAllocations.some(a => a.batchNumber === b.batchNumber));
             const issueWarehouse = firstSelectedBatch?._warehouse || activeWarehouse || material?.warehouse || getWarehouseSearchList()[0] || '';
 
+            function completeDialogAfterIssue() {
+                try { document.body.removeChild(overlay); } catch (_) {}
+                resolve({
+                    success: true,
+                    issuedQuantity: lastIssuedQtyThisDialog,
+                    message: 'Material issued successfully'
+                });
+            }
+
             try {
                 const { resp: response, json: result } = await fetchJsonWithAutoRelease(
                     `${API_CONFIG.BASE_URL}/issue-rmc-batches`,
@@ -5016,6 +5025,13 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                 if (result.success) {
                     materialIssued = true;
                     lastIssuedQtyThisDialog = totalQty;
+
+                    // Embossing: issue completes in this popup — go straight to Running (no Finish step).
+                    if (isEmbossingRoleIssue) {
+                        completeDialogAfterIssue();
+                        return;
+                    }
+
                     issueBtn.style.display = 'none';
                     nextBtn.style.display = 'block';
 
