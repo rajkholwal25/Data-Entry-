@@ -4351,8 +4351,56 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
             return parseFloat(targetWidthInput?.value) || 0;
         }
 
+        function getBatchWidthMm(batch) {
+            const raw = batch.width ?? batch.Width ?? batch.u_width ?? batch.U_Width ?? batch.U_WIDTH;
+            const n = Number(raw);
+            return Number.isFinite(n) ? n : 0;
+        }
+
         function isTargetWidthReady() {
             return !isFirstProcessRMIssue || getTargetWidthMm() > 0;
+        }
+
+        function applyBatchFilters() {
+            const query = searchInput.value.toLowerCase().trim();
+            const targetWidth = isFirstProcessRMIssue ? getTargetWidthMm() : 0;
+
+            filteredBatches = allBatches.filter((b) => {
+                const width = getBatchWidthMm(b);
+                if (targetWidth > 0 && width < targetWidth) return false;
+                if (!query) return true;
+                const raw = (b.batchNumber || '').toLowerCase();
+                const display = formatBatchForDisplay(b.batchNumber).text.toLowerCase();
+                return raw.includes(query) || display.includes(query) || width.toString().includes(query);
+            });
+
+            const filteredTotal = filteredBatches.reduce((sum, b) => sum + (Number(b.available) || 0), 0);
+            totalAvailableSpan.textContent = filteredTotal;
+
+            if (filteredBatches.length === 0) {
+                batchTable.style.display = 'none';
+                noBatchesDiv.style.display = 'block';
+                if (allBatches.length > 0) {
+                    if (targetWidth > 0 && !allBatches.some((b) => getBatchWidthMm(b) >= targetWidth)) {
+                        noBatchesDiv.querySelector('div:first-child').textContent = 'No rolls wide enough';
+                        noBatchesDiv.querySelector('div:last-child').textContent =
+                            `No stock rolls with width ≥ ${targetWidth} mm. Select a wider roll or lower the target width.`;
+                    } else if (query) {
+                        noBatchesDiv.querySelector('div:first-child').textContent = 'No matching batches';
+                        noBatchesDiv.querySelector('div:last-child').textContent = 'Try a different search term or adjust target width';
+                    } else {
+                        noBatchesDiv.querySelector('div:first-child').textContent = 'No batches found';
+                        noBatchesDiv.querySelector('div:last-child').textContent = 'No stock available for this item';
+                    }
+                }
+            } else {
+                batchTable.style.display = 'table';
+                noBatchesDiv.style.display = 'none';
+                renderBatches(filteredBatches);
+            }
+            updateTotalsOnly();
+            updateRequiredDisplay();
+            updateTargetWidthGate();
         }
 
         function clearBatchRowSelection(idx) {
@@ -4498,7 +4546,7 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
 
         if (targetWidthInput) {
             targetWidthInput.addEventListener('input', () => {
-                updateTargetWidthGate();
+                applyBatchFilters();
                 if (calcUpdating) return;
                 calcUpdating = true;
                 try {
@@ -4711,8 +4759,6 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
 
                 if (combinedBatches.length > 0) {
                     allBatches = combinedBatches;
-                    filteredBatches = [...allBatches];
-                    totalAvailableSpan.textContent = combinedTotal;
 
                     if (materialRemaining > 0 && combinedTotal < materialRemaining) {
                         const shortfall = materialRemaining - combinedTotal;
@@ -4728,10 +4774,7 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
                     }
                     
                     loadingDiv.style.display = 'none';
-                    batchTable.style.display = 'table';
-                    renderBatches(filteredBatches);
-                    updateRequiredDisplay();
-                    updateTargetWidthGate();
+                    applyBatchFilters();
                     updatePartialContinueOption();
                 } else {
                     loadingDiv.style.display = 'none';
@@ -4766,20 +4809,9 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
         // Fetch batches on load
         await fetchBatches(currentItemCode);
         
-        // Search/filter functionality
+        // Search/filter functionality (includes target-width roll filter)
         searchInput.addEventListener('input', () => {
-            const query = searchInput.value.toLowerCase().trim();
-            if (!query) {
-                filteredBatches = [...allBatches];
-            } else {
-                filteredBatches = allBatches.filter(b => {
-                    const raw = (b.batchNumber || '').toLowerCase();
-                    const display = formatBatchForDisplay(b.batchNumber).text.toLowerCase();
-                    return raw.includes(query) || display.includes(query) ||
-                        (b.width && b.width.toString().includes(query));
-                });
-            }
-            renderBatches(filteredBatches);
+            applyBatchFilters();
         });
         
         // Item code suffix change
