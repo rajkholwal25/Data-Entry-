@@ -6640,6 +6640,59 @@ app.post('/api/update-production-order-line', async (req, res) => {
 });
 
 /**
+ * Length / width / grade from BatchNumberDetails (Service Layer).
+ * OBTN SQL may omit UDF columns or fall back to DistNumber+Quantity only.
+ */
+async function fetchBatchDimensionsMapFromOData(itemCode) {
+    const map = new Map();
+    const code = String(itemCode || '').trim();
+    if (!code) return map;
+    try {
+        const endpoint = `/BatchNumberDetails?$filter=ItemCode eq '${encodeURIComponent(code)}'&$select=Batch,U_Length,U_Width,U_GRADE`;
+        const result = await sapGetRequest(endpoint);
+        const pickNum = (v) => {
+            const n = Number(v);
+            return Number.isFinite(n) ? n : 0;
+        };
+        for (const row of result?.value || []) {
+            const batch = row.Batch ?? row.batch ?? row.DistNumber ?? row.distNumber;
+            if (batch == null || String(batch).trim() === '') continue;
+            map.set(String(batch).trim(), {
+                length: pickNum(row.U_Length ?? row.u_length ?? row.U_LENGTH),
+                width: pickNum(row.U_Width ?? row.u_width ?? row.U_WIDTH),
+                grade: row.U_GRADE ?? row.u_grade ?? row.U_Grade ?? null
+            });
+        }
+    } catch (err) {
+        console.warn(`   BatchNumberDetails dimension lookup failed for ${code}:`, err.message);
+    }
+    return map;
+}
+
+function normSapSqlRowKey(r, candidates) {
+    if (!r || typeof r !== 'object') return undefined;
+    for (const k of candidates) {
+        if (Object.prototype.hasOwnProperty.call(r, k) && r[k] !== undefined && r[k] !== null) {
+            return r[k];
+        }
+    }
+    const lower = {};
+    for (const [k, v] of Object.entries(r)) {
+        lower[String(k).toLowerCase()] = v;
+    }
+    for (const k of candidates) {
+        const lk = String(k).toLowerCase();
+        if (lower[lk] !== undefined && lower[lk] !== null) return lower[lk];
+    }
+    return undefined;
+}
+
+function numOrZeroSap(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+}
+
+/**
  * GET /api/rmc-batches/:itemCode
  * Fetch all batches for an item with details (Grade, Length, Width, Available) in one warehouse.
  * Pass ?warehouse=WHSCODE from the Production Order line (recommended). Defaults to II-FOI if omitted.
@@ -6663,63 +6716,76 @@ app.get('/api/rmc-batches/:itemCode', async (req, res) => {
 
         console.log(`📦 FETCH BATCHES item=${itemCode} warehouse=${warehouse}`);
 
-        const sqlFull = `SELECT T0."DistNumber", T0."U_GRADE", T0."U_Length", T0."U_Width", T1."Quantity" FROM OBTN T0 INNER JOIN OBTQ T1 ON T0."AbsEntry" = T1."MdAbsEntry" WHERE T1."ItemCode" = '${k}' AND T1."WhsCode" = '${w}' AND T1."Quantity" > 0 ORDER BY T1."Quantity" DESC`;
-        const sqlSimple = `SELECT T0."DistNumber", T1."Quantity" FROM OBTN T0 INNER JOIN OBTQ T1 ON T0."AbsEntry" = T1."MdAbsEntry" WHERE T1."ItemCode" = '${k}' AND T1."WhsCode" = '${w}' AND T1."Quantity" > 0 ORDER BY T1."Quantity" DESC`;
+        const sqlJoin = `FROM OBTN T0 INNER JOIN OBTQ T1 ON T0."AbsEntry" = T1."MdAbsEntry" WHERE T1."ItemCode" = '${k}' AND T1."WhsCode" = '${w}' AND T1."Quantity" > 0 ORDER BY T1."Quantity" DESC`;
+        const sqlDims = `SELECT T0."DistNumber", T0."U_Length", T0."U_Width", T1."Quantity" ${sqlJoin}`;
+        const sqlFull = `SELECT T0."DistNumber", T0."U_GRADE", T0."U_Length", T0."U_Width", T1."Quantity" ${sqlJoin}`;
+        const sqlSimple = `SELECT T0."DistNumber", T1."Quantity" ${sqlJoin}`;
 
         let rows = [];
-        try {
-            rows = await runSapSqlQuery(sqlFull, 'OBTN_batches');
-        } catch (fullErr) {
-            const msg = fullErr?.response?.data?.error?.message?.value || fullErr?.message || '';
-            console.warn(`   Batch query (with UDFs) failed, trying minimal columns: ${msg}`);
+        let sqlLabelUsed = '';
+        for (const attempt of [
+            { sql: sqlDims, label: 'OBTN_batches_dims' },
+            { sql: sqlFull, label: 'OBTN_batches_full' },
+            { sql: sqlSimple, label: 'OBTN_batches_fb' }
+        ]) {
             try {
-                rows = await runSapSqlQuery(sqlSimple, 'OBTN_batches_fb');
-            } catch (fbErr) {
-                console.error(`   Batch query fallback failed: ${fbErr.message}`);
-                throw fbErr;
+                const result = await runSapSqlQuery(attempt.sql, attempt.label);
+                if (Array.isArray(result) && result.length > 0) {
+                    rows = result;
+                    sqlLabelUsed = attempt.label;
+                    break;
+                }
+            } catch (err) {
+                const msg = err?.response?.data?.error?.message?.value || err.message || '';
+                console.warn(`   Batch SQL (${attempt.label}) failed: ${msg}`);
             }
         }
 
-        // SAP SQL / List() may return keys with varying casing (U_Length vs U_LENGTH). Normalize.
-        const normKey = (r, candidates) => {
-            if (!r || typeof r !== 'object') return undefined;
-            for (const k of candidates) {
-                if (Object.prototype.hasOwnProperty.call(r, k) && r[k] !== undefined && r[k] !== null) {
-                    return r[k];
-                }
-            }
-            const lower = {};
-            for (const [k, v] of Object.entries(r)) {
-                lower[String(k).toLowerCase()] = v;
-            }
-            for (const k of candidates) {
-                const lk = String(k).toLowerCase();
-                if (lower[lk] !== undefined && lower[lk] !== null) return lower[lk];
-            }
-            return undefined;
-        };
-        const numOrZero = (v) => {
-            const n = Number(v);
-            return Number.isFinite(n) ? n : 0;
-        };
-
         const batches = (rows || []).map(row => {
-            const dist = normKey(row, ['DistNumber', 'distNumber', 'DISTNUMBER', 'Distnumber']);
-            const qty = normKey(row, ['Quantity', 'quantity', 'QUANTITY']);
-            const grade = normKey(row, ['U_GRADE', 'u_grade', 'U_Grade', 'UGRADE']);
-            const len = normKey(row, ['U_Length', 'u_length', 'U_LENGTH', 'Length', 'length']);
-            const wid = normKey(row, ['U_Width', 'u_width', 'U_WIDTH', 'Width', 'width']);
+            const dist = normSapSqlRowKey(row, ['DistNumber', 'distNumber', 'DISTNUMBER', 'Distnumber']);
+            const qty = normSapSqlRowKey(row, ['Quantity', 'quantity', 'QUANTITY']);
+            const grade = normSapSqlRowKey(row, ['U_GRADE', 'u_grade', 'U_Grade', 'UGRADE']);
+            const len = normSapSqlRowKey(row, ['U_Length', 'u_length', 'U_LENGTH', 'Length', 'length']);
+            const wid = normSapSqlRowKey(row, ['U_Width', 'u_width', 'U_WIDTH', 'Width', 'width']);
             return {
                 batchNumber: dist != null ? String(dist) : '',
                 grade: grade != null && String(grade).trim() !== '' ? String(grade) : 'N/A',
-                length: numOrZero(len),
-                width: numOrZero(wid),
-                available: numOrZero(qty)
+                length: numOrZeroSap(len),
+                width: numOrZeroSap(wid),
+                available: numOrZeroSap(qty)
             };
         });
 
+        const needsDimEnrich = batches.some(b => b.batchNumber && b.available > 0 && (!b.length || !b.width));
+        if (needsDimEnrich) {
+            console.log(`   ⚠️ Missing length/width from SQL (${sqlLabelUsed || 'none'}) — enriching from BatchNumberDetails`);
+            const dimMap = await fetchBatchDimensionsMapFromOData(itemCode);
+            let enrichedCount = 0;
+            for (const b of batches) {
+                const d = dimMap.get(b.batchNumber);
+                if (!d) continue;
+                if (!b.length && d.length) {
+                    b.length = d.length;
+                    enrichedCount++;
+                }
+                if (!b.width && d.width) {
+                    b.width = d.width;
+                    enrichedCount++;
+                }
+                if ((!b.grade || b.grade === 'N/A') && d.grade) {
+                    b.grade = String(d.grade);
+                }
+            }
+            console.log(`   → Enriched ${enrichedCount} dimension field(s) from ${dimMap.size} BatchNumberDetails record(s)`);
+        }
+
         const totalAvailable = batches.reduce((sum, b) => sum + (b.available || 0), 0);
-        console.log(`   → ${batches.length} batch(es), total qty ${totalAvailable}`);
+        if (batches.length > 0) {
+            const s = batches[0];
+            console.log(`   → ${batches.length} batch(es), total qty ${totalAvailable}; sample ${s.batchNumber}: L=${s.length} W=${s.width}`);
+        } else {
+            console.log(`   → 0 batch(es) in ${warehouse}`);
+        }
 
         return res.json({
             success: true,
