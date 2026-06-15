@@ -23,7 +23,8 @@
     "mysql2": "^3.22.0",
     "pg": "^8.21.0",
     "pngjs": "^7.0.0",
-    "puppeteer": "^24.40.0"
+    "puppeteer": "^24.40.0",
+    "qrcode-generator": "^2.0.4"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"

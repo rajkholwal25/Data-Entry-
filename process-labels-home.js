@@ -110,13 +110,13 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     labelData: {
-                        poNumber: d.jobNo || d.poNumber,
+                        poNumber: d.poNo || d.jobNo || d.poNumber,
                         processName: d.processName,
                         outputBatch: d.batchNo || d.outputBatch,
                         actualOutput: d.quantity || d.actualOutput,
-                        rolesUsed: d.rolesUsed,
                         operator: d.operator,
-                        packedOn: d.packedOn
+                        packedOn: d.packedOn,
+                        customerName: d.customerName
                     },
                     numLabels: 1
                 })

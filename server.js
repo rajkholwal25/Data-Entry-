@@ -56,6 +56,8 @@ const {
     outputBatchBelongsToPO,
     getPOTraceabilitySummary,
     getProcessLabelDataFromDB,
+    getPOCustomerName,
+    upsertPOCustomerName,
     listOutputBatchesForPO,
     derivePrevProcessInputItemCode,
     getPreviousUnit1ProcessTag,
@@ -537,7 +539,7 @@ function generateZPLLabel(data, boxNum, totalBoxes) {
     return zpl;
 }
 
-/** Unit 1 process output label (embossing etc.) — output batch + input roles used. */
+/** Unit 1 process output label (embossing etc.) — output batch QR; inputs kept in DB only. */
 function generateProcessZPLLabel(data) {
     const dpmm = LABEL_PRINTER_CONFIG.dpi === 300 ? 12 : 8;
     const labelWidthDots = LABEL_PRINTER_CONFIG.labelWidth * dpmm;
@@ -554,25 +556,17 @@ function generateProcessZPLLabel(data) {
         const mm = (v) => Math.round(v * dpmm);
         return `${mm(ys)},${mm(LABEL_PRINTER_CONFIG.labelHeight - xs)}`;
     };
-    const po = truncate(data.poNumber || data.jobNo || '', 20);
+    const po = truncate(data.poNumber || data.poNo || data.jobNo || '', 20);
     const process = truncate(data.processName || 'Process', 18);
     const batch = truncate(data.outputBatch || data.batchNo || '', 28);
     const output = truncate(String(data.actualOutput ?? data.quantity ?? ''), 12);
-    const operator = truncate(data.operator || '', 22);
-    const roles = Array.isArray(data.rolesUsed) ? data.rolesUsed : [];
-    let roleLines = '';
-    let y = 52;
-    for (let i = 0; i < Math.min(roles.length, 5); i++) {
-        const r = roles[i];
-        const line = `${truncate(r.batch_number || r.batchNumber || '', 18)} ${Number(r.quantity_used || r.quantityUsed || 0)} KGS`;
-        roleLines += `^FO${mapFO(8, y)}^A0N,22,22^FD${truncate(line, 38)}^FS\n`;
-        y += 8;
-    }
-    if (roles.length > 5) {
-        roleLines += `^FO${mapFO(8, y)}^A0N,18,18^FD+${roles.length - 5} more roll(s)^FS\n`;
-    }
+    const customer = truncate(data.customerName || '', 32);
     const padMm = 2.5;
     const mm = (v) => Math.round(v * dpmm);
+    const qrData = String(data.outputBatch || data.batchNo || '').trim();
+    const qrBlock = qrData
+        ? `^FO${mapFO(72, 18)}^BQN,2,5^FDQA,${qrData}^FS\n`
+        : '';
     return `
 ^XA
 ^CI28
@@ -583,14 +577,12 @@ function generateProcessZPLLabel(data) {
 ^FO${mm(padMm)},${mm(padMm)}^GB${labelWidthDots - mm(padMm) * 2},${labelHeightDots - mm(padMm) * 2},3,B,28^FS
 ^FO${mapFO(8, 8)}^A0N,36,36^FDPROCESS OUTPUT LABEL^FS
 ^FO${mapFO(8, 18)}^A0N,24,24^FD${process}^FS
-^FO${mapFO(8, 28)}^A0N,26,26^FDPO: ${po}^FS
-^FO${mapFO(8, 38)}^A0N,26,26^FDOutput Batch:^FS
-^FO${mapFO(42, 38)}^A0N,28,28^FD${batch}^FS
-^FO${mapFO(8, 46)}^A0N,24,24^FDRoles Used:^FS
-${roleLines}
-^FO${mapFO(8, 88)}^A0N,26,26^FDOutput Qty: ${output} KGS^FS
-^FO${mapFO(8, 96)}^A0N,22,22^FDOperator: ${operator}^FS
-^FO${mapFO(8, 104)}^A0N,20,20^FD${data.packedOn || new Date().toLocaleDateString('en-IN')}^FS
+^FO${mapFO(8, 28)}^A0N,26,26^FDPO No.: ${po}^FS
+^FO${mapFO(8, 38)}^A0N,22,22^FDCustomer: ${customer}^FS
+^FO${mapFO(8, 48)}^A0N,26,26^FDBatch:^FS
+^FO${mapFO(22, 48)}^A0N,28,28^FD${batch}^FS
+${qrBlock}^FO${mapFO(8, 88)}^A0N,26,26^FDOutput Qty: ${output} KGS^FS
+^FO${mapFO(8, 96)}^A0N,20,20^FD${data.packedOn || new Date().toLocaleDateString('en-IN')}^FS
 ^XZ
 `;
 }
@@ -5266,6 +5258,13 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
             payload.raw = productionOrder;
         }
 
+        const custForCache = pickFirstNonEmpty(jobData.customerName);
+        if (custForCache) {
+            upsertPOCustomerName(docNumber, custForCache).catch((e) => {
+                console.warn('po_customer_cache upsert on PO load:', e.message);
+            });
+        }
+
         res.json(payload);
 
     } catch (error) {
@@ -5883,6 +5882,26 @@ app.post('/api/job-complete', async (req, res) => {
         }
 
         const result = await insertJobActivities(jobData, activities);
+
+        let custOnComplete = pickFirstNonEmpty(jobData.customer_name, jobData.customerName);
+        if (!custOnComplete && jobData.po_num) {
+            custOnComplete = await getPOCustomerName(jobData.po_num);
+        }
+        if (!custOnComplete && jobData.absolute_entry) {
+            try {
+                const poHead = await sapGetRequest(
+                    `/ProductionOrders(${jobData.absolute_entry})?$select=AbsoluteEntry,U_JobEnt,U_CustName,u_CustName,U_CustCode`
+                );
+                custOnComplete = await fetchCustomerNameFromProductionOrder(poHead);
+            } catch (custErr) {
+                console.warn('Customer name SAP lookup on job-complete:', custErr.message);
+            }
+        }
+        if (custOnComplete && jobData.po_num) {
+            upsertPOCustomerName(jobData.po_num, custOnComplete).catch((e) => {
+                console.warn('po_customer_cache upsert on job-complete:', e.message);
+            });
+        }
 
         // Report completion inputs → role_batch_usage (authoritative traceability link)
         if (result?.batch_num && Array.isArray(jobData.role_usages) && jobData.role_usages.length > 0) {
@@ -7175,6 +7194,82 @@ app.get('/api/traceability/by-batch/:batchNum', async (req, res) => {
 });
 
 /**
+ * Fetch production order row for customer resolution (tolerates missing UDFs on SL).
+ */
+async function fetchProductionOrderRowForCustomer(poNum) {
+    const po = String(poNum || '').trim();
+    if (!po) return null;
+    const activeFilter = `DocumentNumber eq ${po} and ProductionOrderStatus ne 'boposCancelled' and ProductionOrderStatus ne 'boposClosed'`;
+    const selectBase = 'AbsoluteEntry,DocumentNumber,Series,ItemNo,U_JobEnt';
+    const selectExt = `${selectBase},U_CustName,U_CustCode`;
+    for (const select of [selectExt, selectBase]) {
+        try {
+            const poResp = await sapGetRequest(
+                `/ProductionOrders?$filter=${activeFilter}&$select=${select}&$orderby=Series desc&$top=50`
+            );
+            const row = dedupeProductionOrdersByHighestSeries(poResp?.value || [])[0];
+            if (row) return row;
+        } catch (err) {
+            if (select === selectBase) {
+                console.warn(`fetchProductionOrderRowForCustomer PO ${po}:`, err.message);
+            }
+        }
+    }
+    return null;
+}
+
+/** Resolve customer name for a PO: DB cache → SAP PO → OMJD → OITM firm. */
+async function resolveCustomerNameForPO(poNum, itemCodeHint = '') {
+    const po = String(poNum || '').trim();
+    if (!po) return '';
+
+    let name = await getPOCustomerName(po);
+    if (name) return name;
+
+    try {
+        const row = await fetchProductionOrderRowForCustomer(po);
+        if (row) {
+            name = await fetchCustomerNameFromProductionOrder(row);
+            if (!name && row.ItemNo) {
+                name = await fetchCustomerNameFromOITM_OMRC(row.ItemNo);
+            }
+        }
+        const fg = String(itemCodeHint || row?.ItemNo || '').trim();
+        if (!name && fg) {
+            name = await fetchCustomerNameFromOITM_OMRC(fg);
+        }
+        if (name) {
+            await upsertPOCustomerName(po, name);
+        }
+    } catch (err) {
+        console.warn(`resolveCustomerNameForPO ${po}:`, err.message);
+    }
+    return name || '';
+}
+
+/**
+ * Enrich process label payload with SAP customer name (linked via PO / U_JobEnt).
+ * Input roles remain in DB/traceability but are not shown on the printed label.
+ */
+async function enrichProcessLabelData(poNum, raw) {
+    if (!raw || typeof raw !== 'object') return raw;
+    const enriched = { ...raw };
+    const roles = enriched.roleUsages || enriched.rolesUsed || [];
+    enriched.roleUsages = roles;
+    enriched.rolesUsed = roles;
+
+    const existing = pickFirstNonEmpty(enriched.customerName, enriched.customer_name);
+    const itemHint = enriched.fgCode || enriched.itemCode || enriched.fg_num || '';
+    let customerName = (existing && existing !== '—' && existing !== '-') ? existing : '';
+    if (!customerName) {
+        customerName = await resolveCustomerNameForPO(poNum, itemHint);
+    }
+    enriched.customerName = customerName || '—';
+    enriched.poNo = enriched.poNumber || enriched.po_num || poNum;
+    return enriched;
+}
+
+/**
  * GET /api/process-label/by-po/:poNum?batch=…&list=1
  * Build process output label from saved DB data (post-submit / reprint).
  */
@@ -7199,7 +7294,8 @@ app.get('/api/process-label/by-po/:poNum', async (req, res) => {
                     : `No saved production batch for PO ${poNum}`
             });
         }
-        return res.json({ success: true, poNum, labelData: raw });
+        const labelData = await enrichProcessLabelData(poNum, raw);
+        return res.json({ success: true, poNum, labelData });
     } catch (error) {
         console.error('Process label lookup error:', error.message);
         return res.status(500).json({ success: false, message: error.message });
@@ -9004,7 +9100,9 @@ app.post('/api/process-print-labels', async (req, res) => {
         if (!labelData || typeof labelData !== 'object') {
             return res.status(400).json({ error: 'labelData object is required' });
         }
-        const printResult = await printProcessLabel(labelData, n);
+        const poNum = String(labelData.poNumber || labelData.poNo || labelData.jobNo || '').trim();
+        const enriched = poNum ? await enrichProcessLabelData(poNum, labelData) : labelData;
+        const printResult = await printProcessLabel(enriched, n);
         res.json({ success: printResult.success, printResult });
     } catch (error) {
         console.error('❌ /api/process-print-labels:', error.message);

@@ -4249,6 +4249,112 @@ body {
     text-align: center;
 }
 
+.sap-logo img {
+    width: 28.75mm;
+    max-height: 16mm;
+    height: auto;
+    display: block;
+    object-fit: contain;
+}
+
+.sap-label.process-output-label {
+    padding: 2mm 5mm 3mm 0;
+}
+
+.sap-label.process-output-label .sap-logo {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    flex-shrink: 0;
+    line-height: 0;
+    align-self: center;
+}
+
+.sap-label.process-output-label .sap-logo img,
+.sap-label.process-output-label .sap-logo-bw {
+    width: 62mm;
+    max-height: 34mm;
+    margin: -1.5mm 0 0 0;
+    background: transparent;
+    mix-blend-mode: multiply;
+    filter: grayscale(100%) contrast(1.2);
+    object-position: left top;
+    display: block;
+}
+
+.sap-label.process-output-label .sap-top {
+    margin-bottom: 0;
+    gap: 2mm;
+    align-items: center;
+    padding-top: 0;
+}
+
+.sap-label.process-output-label .sap-company {
+    padding-top: 1mm;
+    align-self: center;
+    margin-top: 0;
+}
+
+.sap-label.process-output-label .sap-title {
+    margin: -1.2mm 0 0.5mm;
+    font-size: 5.8mm;
+}
+
+.sap-label.process-output-label .sap-fields {
+    font-size: 4mm;
+    line-height: 1.1;
+}
+
+.sap-label.process-output-label .sap-fields-grid {
+    width: 100%;
+    margin-left: 3mm;
+    table-layout: fixed;
+    border-collapse: collapse;
+}
+
+.sap-label.process-output-label .sap-fields-grid .col-k {
+    width: 30mm;
+}
+
+.sap-label.process-output-label .sap-fields-grid .col-barcode {
+    width: 52mm;
+}
+
+.sap-label.process-output-label .sap-fields-grid .k {
+    width: 30mm;
+    padding-left: 0;
+    font-weight: 500;
+}
+
+.sap-label.process-output-label .sap-fields-grid td.v {
+    padding-left: 2mm;
+    font-weight: 400;
+}
+
+.sap-label.process-output-label .sap-fields-grid .barcode-cell {
+    vertical-align: top;
+    text-align: center;
+    padding-left: 2mm;
+}
+
+.sap-label.process-output-label .sap-table td {
+    padding: 0.35mm 0;
+    vertical-align: baseline;
+}
+
+.sap-label.process-output-label .sap-barcode svg {
+    width: 48mm;
+    height: 11mm;
+    display: block;
+    margin: 0 auto;
+}
+
+.sap-label.process-output-label .sap-barcode .code-text {
+    font-size: 3.3mm;
+    letter-spacing: 0.15mm;
+    line-height: 1.1;
+}
+
 .sap-barcode-title {
     text-align: center;
     font-size: 3.6mm;
@@ -4264,6 +4370,14 @@ body {
 .sap-barcode svg {
     width: 55mm;
     height: 12mm;
+    display: block;
+    margin: 0 auto;
+}
+
+.sap-barcode.sap-qr svg,
+.sap-barcode.sap-qr .qr-svg {
+    width: 28mm;
+    height: 28mm;
     display: block;
     margin: 0 auto;
 }

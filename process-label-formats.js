@@ -111,10 +111,11 @@
             processTag,
             slipTitle: cfg.slipTitle,
             quantityLabel: cfg.quantityLabel,
-            customerName: customerName || job?.customerName || '—',
+            customerName: customerName || job?.customerName || '',
             itemDescription: itemDescription || job?.jobName || job?.itemNo || '—',
             fgCode: job?.itemNo || job?.itemCode || '—',
             jobNo: poNumber || job?.poNumber || job?.jobNumber || '—',
+            poNo: poNumber || job?.poNumber || job?.jobNumber || '—',
             batchNo: batch,
             quantity: formatKgs(actualOutput),
             packedOn: packedOnStr,
@@ -125,6 +126,23 @@
             barcodeValue,
             barcodeDisplay: batch || job?.itemNo || ''
         };
+    }
+
+    /** QR code for batch — process labels only (FG keeps Code39 in finished-goods.js). */
+    function renderQrSvg(value) {
+        const text = String(value || '').trim();
+        if (!text) return '';
+        const qrFactory = (typeof qrcode !== 'undefined' && qrcode) || null;
+        if (!qrFactory) return renderCode39Svg(text);
+        try {
+            const qr = qrFactory(0, 'M');
+            qr.addData(text);
+            qr.make();
+            const svg = qr.createSvgTag(3, 2);
+            return svg.replace('<svg ', '<svg class="qr-svg" ');
+        } catch {
+            return renderCode39Svg(text);
+        }
     }
 
     function renderCode39Svg(value) {
@@ -171,15 +189,17 @@
 
     /** FG-style process output label — matches packing slip layout (see finished-goods generateLabelHTML). */
     function renderStandardProcessLabel(data) {
-        const barcodeSvg = data.barcodeValue ? renderCode39Svg(data.barcodeValue) : '';
-        const rolesHtml = rolesSummaryHtml(data.rolesUsed || []);
+        const batchCode = data.barcodeDisplay || data.batchNo || data.barcodeValue || '';
+        const barcodeValue = data.barcodeValue || batchCode;
+        const barcodeSvg = barcodeValue ? renderCode39Svg(barcodeValue) : '';
+        const poDisplay = data.poNo || data.jobNo || '—';
         return `
         <div class="label-page">
           <div class="label-page-inner">
-            <div class="sap-label">
+            <div class="sap-label process-output-label">
               <div class="sap-top">
                 <div class="sap-logo">
-                  <img src="/vk-logo.png" alt="VK logo" onerror="this.style.display='none'">
+                  <img class="sap-logo-bw" src="/vk-logo.png" alt="VK logo" onerror="this.style.display='none'">
                 </div>
                 <div class="sap-company">
                   <strong>VK GLOBAL DIGITAL PRIVATE LIMITED</strong>
@@ -189,46 +209,48 @@
               </div>
               <div class="sap-title">${escapeHtml(data.slipTitle || 'PROCESS OUTPUT')}</div>
               <div class="sap-fields">
-                <table class="sap-table sap-fields-table">
+                <table class="sap-table sap-fields-grid">
+                  <colgroup>
+                    <col class="col-k"><col class="col-v"><col class="col-barcode">
+                  </colgroup>
                   <tr>
                     <td class="k">Customer Name</td>
-                    <td class="v">${escapeHtml(data.customerName)}</td>
+                    <td class="v" colspan="2">${escapeHtml(data.customerName || '—')}</td>
                   </tr>
                   <tr>
                     <td class="k">Item Description</td>
-                    <td class="v">${escapeHtml(data.itemDescription)}</td>
+                    <td class="v" colspan="2">${escapeHtml(data.itemDescription)}</td>
                   </tr>
-                </table>
-                <table class="sap-table sap-details-grid">
-                  <colgroup>
-                    <col class="col-k"><col class="col-v"><col class="col-rk"><col class="col-rv">
-                  </colgroup>
                   <tr>
-                    <td class="k">FG Code</td><td class="v">${escapeHtml(data.fgCode)}</td>
-                    <td class="barcode-cell" colspan="2" rowspan="3">
+                    <td class="k">FG Code</td>
+                    <td class="v" colspan="2">${escapeHtml(data.fgCode)}</td>
+                  </tr>
+                  <tr>
+                    <td class="k">PO No.</td>
+                    <td class="v">${escapeHtml(poDisplay)}</td>
+                    <td class="barcode-cell" rowspan="5">
                       <div class="sap-barcode-title">Batch No</div>
                       <div class="sap-barcode">
                         ${barcodeSvg}
-                        <div class="code-text">${escapeHtml(data.barcodeDisplay)}</div>
+                        <div class="code-text">${escapeHtml(batchCode)}</div>
                       </div>
                     </td>
                   </tr>
                   <tr>
-                    <td class="k">Job No</td><td class="v">${escapeHtml(data.jobNo)}</td>
+                    <td class="k">${escapeHtml(data.quantityLabel || 'Output (KGS)')}</td>
+                    <td class="v">${escapeHtml(data.quantity)} KGS</td>
                   </tr>
                   <tr>
-                    <td class="k">${escapeHtml(data.quantityLabel || 'Output (KGS)')}</td><td class="v">${escapeHtml(data.quantity)} KGS</td>
+                    <td class="k">Packed On</td>
+                    <td class="v">${escapeHtml(data.packedOn)}</td>
                   </tr>
                   <tr>
-                    <td class="k">Packed On</td><td class="v">${escapeHtml(data.packedOn)}</td>
-                    <td class="rk">Machine</td><td class="rv">${escapeHtml(data.machineName)}</td>
+                    <td class="k">Process</td>
+                    <td class="v">${escapeHtml(data.processName)}</td>
                   </tr>
                   <tr>
-                    <td class="k">Operator</td><td class="v">${escapeHtml(data.operator)}</td>
-                    <td class="rk">Process</td><td class="rv">${escapeHtml(data.processName)}</td>
-                  </tr>
-                  <tr>
-                    <td class="k">Inputs Used</td><td class="v" colspan="3">${rolesHtml}</td>
+                    <td class="k">Machine</td>
+                    <td class="v">${escapeHtml(data.machineName)}</td>
                   </tr>
                 </table>
               </div>
@@ -259,6 +281,7 @@
         generateProcessLabelHTML,
         renderStandardProcessLabel,
         renderCode39Svg,
+        renderQrSvg,
         formatMachineDisplayName,
         formatProcessDisplayName
     };

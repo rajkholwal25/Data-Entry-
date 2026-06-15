@@ -148,6 +148,15 @@ async function ensureSchema() {
         }
     }
 
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS po_customer_cache (
+            po_num         VARCHAR(64) PRIMARY KEY,
+            customer_name  VARCHAR(255) NOT NULL,
+            updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_po_customer_cache_po ON po_customer_cache (po_num)`);
+
     // PostgreSQL cannot add/reorder view columns via CREATE OR REPLACE — drop first.
     await pool.query('DROP VIEW IF EXISTS vw_shift_summary');
     await pool.query('DROP VIEW IF EXISTS vw_job_summary');
@@ -1992,6 +2001,36 @@ async function getProcessInputsWithRemaining(poNum, currentProcessTag, fgItemCod
     return mergeProcessInputSources(po, prevTag, fgItemCode, sourcePoNums);
 }
 
+/** Cached customer name for a PO (saved on PO load / job complete / label enrich). */
+async function getPOCustomerName(poNum) {
+    const po = String(poNum || '').trim();
+    if (!po) return '';
+    try {
+        const [rows] = await pool.query(
+            'SELECT customer_name FROM po_customer_cache WHERE po_num = ?',
+            [po]
+        );
+        return String(rows[0]?.customer_name || '').trim();
+    } catch {
+        return '';
+    }
+}
+
+async function upsertPOCustomerName(poNum, customerName) {
+    const po = String(poNum || '').trim();
+    const name = String(customerName || '').trim();
+    if (!po || !name || name === '—' || name === '-') return false;
+    await pool.query(
+        `INSERT INTO po_customer_cache (po_num, customer_name, updated_at)
+         VALUES (?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT (po_num) DO UPDATE SET
+           customer_name = EXCLUDED.customer_name,
+           updated_at = CURRENT_TIMESTAMP`,
+        [po, name]
+    );
+    return true;
+}
+
 /**
  * Build process output label payload from saved production + traceability data.
  * Requires PO; optional output batch (latest batch for PO if omitted).
@@ -2016,6 +2055,7 @@ async function getProcessLabelDataFromDB(poNum, outputBatch = null) {
     if (!prod?.batch_num) return null;
 
     const inputs = await getGenealogyByOutputBatch(prod.batch_num, po);
+    const customerName = await getPOCustomerName(po);
     const packedDate = prod.job_end_time || prod.job_start_time;
     let packedOn = '';
     if (packedDate) {
@@ -2038,6 +2078,7 @@ async function getProcessLabelDataFromDB(poNum, outputBatch = null) {
         machineName: formatMachineDisplayName(prod.machine_name) || prod.machine_name || '—',
         processName: prod.process_name || null,
         packedOn,
+        customerName: customerName || null,
         roleUsages: inputs.map((i) => ({
             batch_number: i.batch_number,
             quantity_used: Number(i.quantity) || 0,
@@ -2104,6 +2145,8 @@ module.exports = {
     outputBatchBelongsToPO,
     getPOTraceabilitySummary,
     getProcessLabelDataFromDB,
+    getPOCustomerName,
+    upsertPOCustomerName,
     listOutputBatchesForPO,
     getTraceabilityByPO,
     getTraceabilityByOutputBatch,

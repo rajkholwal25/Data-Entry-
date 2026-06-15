@@ -1406,13 +1406,13 @@ function wireProcessLabelModalListeners() {
         const labelData = window._pendingProcessLabelData;
         if (labelData) {
             const payload = {
-                poNumber: labelData.jobNo || labelData.poNumber,
+                poNumber: labelData.poNo || labelData.jobNo || labelData.poNumber,
                 processName: labelData.processName,
                 outputBatch: labelData.batchNo || labelData.outputBatch,
                 actualOutput: labelData.quantity || labelData.actualOutput,
-                rolesUsed: labelData.rolesUsed,
                 operator: labelData.operator,
-                packedOn: labelData.packedOn
+                packedOn: labelData.packedOn,
+                customerName: labelData.customerName
             };
             await sendProcessLabelToPrinter(payload);
         }
@@ -5701,6 +5701,7 @@ async function displayFetchedJob(jobData) {
         uPCode: jobData.uPCode || '',
         uJobEnt: jobData.uJobEnt ?? null,  // For job-complete auto-issue (skip SAP GET)
         absoluteEntry: jobData.absoluteEntry || null,  // SAP AbsoluteEntry for posting
+        customerName: jobData.customerName || jobData.customerCode || '',
         baseQuantities: jobData.baseQuantities || [],  // Array of base quantities from SAP
         fgLines: jobData.fgLines || [],  // Multi-output (jumbled) FG lines from SAP
         isJumbledJob: jobData.isJumbledJob === true || (jobData.fgLines && jobData.fgLines.length > 1),
@@ -8284,7 +8285,8 @@ async function completeJobInDatabase(jobData, makereadySeconds, runningSeconds, 
             u_job_ent: jobData.uJobEnt ?? null,
             u_p_code: jobData.uPCode || '',
             u_pcode: jobData.uPCode || '',
-            uPCode: jobData.uPCode || ''
+            uPCode: jobData.uPCode || '',
+            customer_name: jobData.customerName || ''
         };
         
         // Debug: Log SAP posting fields
