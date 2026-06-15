@@ -1,15 +1,25 @@
 /**
- * Unit 1 process output label formats (FG-style layout).
- * Edit PROCESS_LABEL_CONFIG per process — shared HTML structure below.
+ * Unit 1 process output label formats — FG-style layout (150mm × 100mm).
+ * Each process has its own slip title; HTML structure matches finished-goods packing slip.
  */
 (function (global) {
     const PROCESS_LABEL_CONFIG = {
-        EMB: { slipTitle: 'EMBOSSING OUTPUT', quantityLabel: 'Output (KGS)' },
-        MET: { slipTitle: 'METALLISATION OUTPUT', quantityLabel: 'Output (KGS)' },
-        COT: { slipTitle: 'COATING OUTPUT', quantityLabel: 'Output (KGS)' },
-        SLT: { slipTitle: 'SLITTING OUTPUT', quantityLabel: 'Output (KGS)' },
-        REW: { slipTitle: 'REWINDING OUTPUT', quantityLabel: 'Output (KGS)' },
-        default: { slipTitle: 'PROCESS OUTPUT', quantityLabel: 'Output (KGS)' }
+        EMB: { slipTitle: 'EMBOSSING OUTPUT', quantityLabel: 'Output (KGS)', processName: 'Embossing' },
+        MET: { slipTitle: 'METALLISATION OUTPUT', quantityLabel: 'Output (KGS)', processName: 'Metallisation' },
+        COT: { slipTitle: 'COATING OUTPUT', quantityLabel: 'Output (KGS)', processName: 'Coating' },
+        SLT: { slipTitle: 'SLITTING OUTPUT', quantityLabel: 'Output (KGS)', processName: 'Slitting' },
+        REW: { slipTitle: 'REWINDING OUTPUT', quantityLabel: 'Output (KGS)', processName: 'Rewinding' },
+        default: { slipTitle: 'PROCESS OUTPUT', quantityLabel: 'Output (KGS)', processName: 'Process' }
+    };
+
+    /** Per-process HTML templates — same FG-style grid; title/labels from config above. */
+    const PROCESS_LABEL_TEMPLATES = {
+        EMB: renderStandardProcessLabel,
+        MET: renderStandardProcessLabel,
+        COT: renderStandardProcessLabel,
+        SLT: renderStandardProcessLabel,
+        REW: renderStandardProcessLabel,
+        default: renderStandardProcessLabel
     };
 
     function escapeHtml(text) {
@@ -34,7 +44,7 @@
         if (proc.includes('coat')) return 'COT';
         if (proc.includes('slit')) return 'SLT';
         if (proc.includes('rewind')) return 'REW';
-        const item = String(job?.itemNo || '').toUpperCase();
+        const item = String(job?.itemNo || job?.itemCode || '').toUpperCase();
         if (item.endsWith('-EMB')) return 'EMB';
         if (item.endsWith('-MET') || item.endsWith('-MTL')) return 'MET';
         if (item.endsWith('-COT')) return 'COT';
@@ -52,6 +62,28 @@
         return Math.abs(v - Math.round(v)) < 0.001 ? String(Math.round(v)) : v.toFixed(2);
     }
 
+    function formatMachineDisplayName(name) {
+        const raw = String(name || '').trim();
+        if (!raw) return '';
+        return raw
+            .split('-')
+            .map((word) => {
+                const w = word.trim();
+                if (!w) return '';
+                return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+            })
+            .filter(Boolean)
+            .join('-');
+    }
+
+    function formatProcessDisplayName(processTag, fallback) {
+        const cfg = getConfig(processTag);
+        if (cfg.processName) return cfg.processName;
+        const fb = String(fallback || '').trim();
+        if (fb) return fb.charAt(0).toUpperCase() + fb.slice(1).toLowerCase();
+        return 'Process';
+    }
+
     function buildLabelDataFromFinish({
         job,
         machineInfo,
@@ -61,26 +93,34 @@
         roleUsages,
         operator,
         customerName,
-        itemDescription
+        itemDescription,
+        packedOn
     }) {
         const processTag = inferProcessTag(job, machineInfo);
         const cfg = getConfig(processTag);
         const batch = outputBatch || '';
         const barcodeValue = batch.toUpperCase().replace(/[^0-9A-Z \-\.\$\/\+%]/g, '');
+        let packedOnStr = packedOn || '';
+        if (!packedOnStr) {
+            packedOnStr = new Date().toLocaleDateString('en-IN');
+        } else if (packedOn instanceof Date || !isNaN(new Date(packedOn).getTime())) {
+            const dt = new Date(packedOn);
+            if (!isNaN(dt)) packedOnStr = dt.toLocaleDateString('en-IN');
+        }
         return {
             processTag,
             slipTitle: cfg.slipTitle,
             quantityLabel: cfg.quantityLabel,
             customerName: customerName || job?.customerName || '—',
             itemDescription: itemDescription || job?.jobName || job?.itemNo || '—',
-            fgCode: job?.itemNo || '—',
+            fgCode: job?.itemNo || job?.itemCode || '—',
             jobNo: poNumber || job?.poNumber || job?.jobNumber || '—',
             batchNo: batch,
             quantity: formatKgs(actualOutput),
-            packedOn: new Date().toLocaleDateString('en-IN'),
+            packedOn: packedOnStr,
             operator: operator || '—',
-            machineName: machineInfo?.name || '—',
-            processName: machineInfo?.process || cfg.slipTitle,
+            machineName: formatMachineDisplayName(machineInfo?.name) || machineInfo?.name || '—',
+            processName: formatProcessDisplayName(processTag, machineInfo?.process),
             rolesUsed: Array.isArray(roleUsages) ? roleUsages : [],
             barcodeValue,
             barcodeDisplay: batch || job?.itemNo || ''
@@ -129,8 +169,8 @@
         }).join('<br/>') + (roles.length > 4 ? `<br/>+${roles.length - 4} more` : '');
     }
 
-    /** FG-style label HTML — same visual structure as finished-goods packing slip. */
-    function generateProcessLabelHTML(data) {
+    /** FG-style process output label — matches packing slip layout (see finished-goods generateLabelHTML). */
+    function renderStandardProcessLabel(data) {
         const barcodeSvg = data.barcodeValue ? renderCode39Svg(data.barcodeValue) : '';
         const rolesHtml = rolesSummaryHtml(data.rolesUsed || []);
         return `
@@ -197,12 +237,29 @@
         </div>`;
     }
 
+    function generateProcessLabelHTML(data) {
+        const tag = data.processTag || inferProcessTag({ itemNo: data.fgCode, uPCode: '' }, { process: data.processName });
+        const render = PROCESS_LABEL_TEMPLATES[tag] || PROCESS_LABEL_TEMPLATES.default;
+        const cfg = getConfig(tag);
+        const merged = {
+            ...data,
+            slipTitle: data.slipTitle || cfg.slipTitle,
+            quantityLabel: data.quantityLabel || cfg.quantityLabel,
+            processName: data.processName || cfg.processName
+        };
+        return render(merged);
+    }
+
     global.ProcessLabelFormats = {
         PROCESS_LABEL_CONFIG,
+        PROCESS_LABEL_TEMPLATES,
         inferProcessTag,
         getConfig,
         buildLabelDataFromFinish,
         generateProcessLabelHTML,
-        renderCode39Svg
+        renderStandardProcessLabel,
+        renderCode39Svg,
+        formatMachineDisplayName,
+        formatProcessDisplayName
     };
 })(typeof window !== 'undefined' ? window : global);

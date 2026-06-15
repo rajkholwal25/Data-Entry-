@@ -375,6 +375,21 @@ async function resolveCompletionOperatorMeta(outputBatch, completionMeta = {}) {
     return { operatorName: operatorName || null, machineName: machineName || null };
 }
 
+/** Display form: slitting-1 → Slitting-1 (title-case each hyphen segment). */
+function formatMachineDisplayName(machineName) {
+    const raw = String(machineName || '').trim();
+    if (!raw) return '';
+    return raw
+        .split('-')
+        .map((word) => {
+            const w = word.trim();
+            if (!w) return '';
+            return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+        })
+        .filter(Boolean)
+        .join('-');
+}
+
 /** Unit 1 process chain — each step consumes previous step output batches. */
 const UNIT1_PROCESS_CHAIN = ['EMB', 'MET', 'COT', 'SLT', 'REW', 'FG'];
 
@@ -1639,7 +1654,7 @@ async function getPOTraceabilitySummary(poNum, options = {}) {
             inputType: r.input_type || 'raw_roll',
             warehouse: r.warehouse,
             operator: r.operator_name,
-            machine: r.machine_name,
+            machine: formatMachineDisplayName(r.machine_name) || r.machine_name,
             usedAt: r.used_at
         });
         out.totalInputQty += Number(r.quantity) || 0;
@@ -1761,7 +1776,7 @@ async function getPOTraceabilitySummary(poNum, options = {}) {
             inputType: r.input_type || 'raw_roll',
             warehouse: r.warehouse,
             operator: r.operator_name,
-            machine: r.machine_name,
+            machine: formatMachineDisplayName(r.machine_name) || r.machine_name,
             usedAt: r.used_at,
             issuedAt: r.issued_at
         });
@@ -1775,6 +1790,24 @@ async function getPOTraceabilitySummary(poNum, options = {}) {
         count: genealogyRows.length,
         genealogy: Object.values(groups)
     };
+}
+
+/** Process-step inputs must have source_po_num; drop legacy rows without PO. */
+function dropUnsourcedProcessBatchDupes(rows, prevTag) {
+    const prev = String(prevTag || '').trim().toUpperCase();
+    const isProcessBatch = (r) => {
+        const batch = String(r.batch_number || '').trim();
+        if (!batch) return false;
+        if (r.input_type === 'raw_roll') return false;
+        return r.input_type === 'process_batch'
+            || Boolean(String(r.source_po_num || '').trim())
+            || (prev && batch.includes(`-${prev}-`))
+            || !batch.toUpperCase().startsWith('PMI');
+    };
+    return rows.filter((r) => {
+        if (!isProcessBatch(r)) return true;
+        return Boolean(String(r.source_po_num || '').trim());
+    });
 }
 
 /** Stable client/server id for previous-process batch (batch codes repeat per source PO). */
@@ -1858,8 +1891,8 @@ async function getPreviousProcessOutputBatches(poNum, prevTag, fgItemCode, sourc
                FROM role_batch_usage
               WHERE po_num = ?
                 AND input_batch_number = ?
-                AND (source_po_num = ? OR (source_po_num IS NULL AND ? IS NULL))`,
-            [po, r.batch_number, sourcePo || null, sourcePo || null]
+                AND COALESCE(source_po_num, '') = COALESCE(?, '')`,
+            [po, r.batch_number, sourcePo || null]
         );
         const used = Number(usedRows[0]?.used_qty) || 0;
         results.push({
@@ -1924,15 +1957,18 @@ async function mergeProcessInputSources(poNum, prevTag, fgItemCode, sourcePoNums
         });
     }
 
-    return Array.from(byKey.values()).sort((a, b) => {
-        const ta = a.issued_at ? new Date(a.issued_at).getTime() : 0;
-        const tb = b.issued_at ? new Date(b.issued_at).getTime() : 0;
-        if (ta !== tb) return ta - tb;
-        const pa = String(a.source_po_num || '');
-        const pb = String(b.source_po_num || '');
-        if (pa !== pb) return pa.localeCompare(pb);
-        return String(a.batch_number).localeCompare(String(b.batch_number));
-    });
+    return dropUnsourcedProcessBatchDupes(
+        Array.from(byKey.values()).sort((a, b) => {
+            const ta = a.issued_at ? new Date(a.issued_at).getTime() : 0;
+            const tb = b.issued_at ? new Date(b.issued_at).getTime() : 0;
+            if (ta !== tb) return ta - tb;
+            const pa = String(a.source_po_num || '');
+            const pb = String(b.source_po_num || '');
+            if (pa !== pb) return pa.localeCompare(pb);
+            return String(a.batch_number).localeCompare(String(b.batch_number));
+        }),
+        prevTag
+    );
 }
 
 /**
@@ -1956,6 +1992,86 @@ async function getProcessInputsWithRemaining(poNum, currentProcessTag, fgItemCod
     return mergeProcessInputSources(po, prevTag, fgItemCode, sourcePoNums);
 }
 
+/**
+ * Build process output label payload from saved production + traceability data.
+ * Requires PO; optional output batch (latest batch for PO if omitted).
+ */
+async function getProcessLabelDataFromDB(poNum, outputBatch = null) {
+    const po = String(poNum || '').trim();
+    if (!po) return null;
+    const batch = outputBatch != null ? String(outputBatch).trim() : '';
+
+    const params = batch ? [po, batch] : [po];
+    const batchClause = batch ? ' AND batch_num = ?' : '';
+    const [prodRows] = await pool.query(
+        `SELECT batch_num, po_num, fg_num, job_name, operator_name, machine_name,
+                process_name, quantity_processed, job_end_time, job_start_time
+           FROM production_records
+          WHERE po_num = ?${batchClause}
+          ORDER BY job_end_time DESC NULLS LAST, unique_id DESC
+          LIMIT 1`,
+        params
+    );
+    const prod = prodRows[0];
+    if (!prod?.batch_num) return null;
+
+    const inputs = await getGenealogyByOutputBatch(prod.batch_num, po);
+    const packedDate = prod.job_end_time || prod.job_start_time;
+    let packedOn = '';
+    if (packedDate) {
+        const dt = new Date(packedDate);
+        packedOn = isNaN(dt) ? String(packedDate) : dt.toLocaleDateString('en-IN');
+    }
+
+    return {
+        poNumber: po,
+        po_num: po,
+        outputBatch: prod.batch_num,
+        batchNo: prod.batch_num,
+        itemCode: prod.fg_num || null,
+        fgCode: prod.fg_num || '—',
+        itemDescription: prod.job_name || prod.fg_num || '—',
+        jobName: prod.job_name || null,
+        actualOutput: Number(prod.quantity_processed) || 0,
+        quantity: Number(prod.quantity_processed) || 0,
+        operator: prod.operator_name || '—',
+        machineName: formatMachineDisplayName(prod.machine_name) || prod.machine_name || '—',
+        processName: prod.process_name || null,
+        packedOn,
+        roleUsages: inputs.map((i) => ({
+            batch_number: i.batch_number,
+            quantity_used: Number(i.quantity) || 0,
+            item_code: i.item_code,
+            source_po_num: i.source_po_num || null
+        }))
+    };
+}
+
+/** List output batches for a PO (for label reprint picker). */
+async function listOutputBatchesForPO(poNum) {
+    const po = String(poNum || '').trim();
+    if (!po) return [];
+    const [rows] = await pool.query(
+        `SELECT batch_num AS batch_num,
+                MAX(fg_num) AS fg_num,
+                MAX(quantity_processed) AS quantity_processed,
+                MAX(job_end_time) AS job_end_time,
+                MAX(operator_name) AS operator_name
+           FROM production_records
+          WHERE po_num = ?
+          GROUP BY batch_num
+          ORDER BY MAX(job_end_time) DESC NULLS LAST`,
+        [po]
+    );
+    return rows.map((r) => ({
+        outputBatch: r.batch_num,
+        itemCode: r.fg_num,
+        quantity: Number(r.quantity_processed) || 0,
+        completedAt: r.job_end_time,
+        operator: r.operator_name
+    }));
+}
+
 module.exports = {
     pool,
     testConnection,
@@ -1973,6 +2089,7 @@ module.exports = {
     buildPrevProcessBatchPattern,
     derivePrevProcessInputItemCode,
     makeProcessBatchIssueId,
+    formatMachineDisplayName,
     getPreviousUnit1ProcessTag,
     getUnit1ProcessChainIndex,
     isTerminalUnit1Process,
@@ -1986,6 +2103,8 @@ module.exports = {
     getOutputBatchOwnerPO,
     outputBatchBelongsToPO,
     getPOTraceabilitySummary,
+    getProcessLabelDataFromDB,
+    listOutputBatchesForPO,
     getTraceabilityByPO,
     getTraceabilityByOutputBatch,
     getBatchNum,

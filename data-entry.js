@@ -223,7 +223,8 @@ function loadStateFromStorage() {
         const currentProcess = urlParams.get('process');
         
         if (state.machineInfo && 
-            (state.machineInfo.name !== currentMachine || state.machineInfo.process !== currentProcess)) {
+            (String(state.machineInfo.name || '').trim().toLowerCase() !== String(currentMachine || '').trim().toLowerCase()
+                || state.machineInfo.process !== currentProcess)) {
             console.log('📍 Different machine/process, not restoring state');
             return false;
         }
@@ -902,7 +903,15 @@ let finishInputRoles = [];
 let finishSelectedInputs = [];
 let _processLabelSubmitCallback = null;
 
+function isProcessInputRole(r) {
+    const batch = String(r.batch_number || '').trim();
+    if (!batch) return false;
+    if (r.input_type === 'raw_roll') return false;
+    return r.input_type === 'process_batch' || !batch.toUpperCase().startsWith('PMI');
+}
+
 /** Client-side safety: one entry per batch_number + source PO with merged used/remaining. */
+let _deferredJobFinishReset = null;
 function dedupeSummaryIssuedRoles(roles) {
     if (!Array.isArray(roles) || roles.length === 0) return [];
     const byBatch = new Map();
@@ -910,6 +919,7 @@ function dedupeSummaryIssuedRoles(roles) {
         const batch = String(r.batch_number || '').trim();
         if (!batch) continue;
         const sourcePo = String(r.source_po_num || '').trim();
+        if (isProcessInputRole(r) && !sourcePo) continue;
         const key = sourcePo ? `${sourcePo}:${batch}` : batch;
         const issued = Number(r.issued_qty) || 0;
         const used = Number(r.used_qty) || 0;
@@ -1165,9 +1175,85 @@ function showProcessLabelPreviewModal(labelData, onConfirm, completedJobRef) {
     _processLabelSubmitCallback = onConfirm || null;
     window._pendingProcessLabelData = labelData;
     window._pendingCompletedJobForLabel = completedJobRef || null;
+    window._labelPreviewFromFinish = false;
     const host = document.getElementById('process-label-preview-host');
     if (host) host.innerHTML = buildProcessLabelPreviewHtml(labelData);
+    const hint = document.getElementById('process-label-hint');
+    if (hint) {
+        hint.textContent = onConfirm
+            ? 'Preview output label. Confirm to save job, then print.'
+            : 'Job saved successfully. Print label or close to return to machine.';
+    }
     showModal('process-label-modal-overlay');
+}
+
+/** Fetch label payload from DB (saved at report completion). */
+async function fetchProcessLabelData(poNum, outputBatch) {
+    const po = String(poNum || '').trim();
+    const qs = new URLSearchParams();
+    if (outputBatch) qs.set('batch', String(outputBatch).trim());
+    const res = await fetch(
+        `${API_CONFIG.BASE_URL}/process-label/by-po/${encodeURIComponent(po)}?${qs}`
+    );
+    const json = await res.json();
+    if (!res.ok || !json.success) {
+        throw new Error(json.message || `HTTP ${res.status}`);
+    }
+    const raw = json.labelData;
+    if (typeof ProcessLabelFormats === 'undefined') return raw;
+    return ProcessLabelFormats.buildLabelDataFromFinish({
+        job: {
+            itemNo: raw.itemCode || raw.fgCode,
+            jobName: raw.itemDescription || raw.jobName,
+            uPCode: raw.uPCode || ''
+        },
+        machineInfo: { name: raw.machineName, process: raw.processName },
+        poNumber: raw.poNumber || po,
+        outputBatch: raw.outputBatch || raw.batchNo,
+        actualOutput: raw.actualOutput ?? raw.quantity,
+        roleUsages: raw.roleUsages || [],
+        operator: raw.operator,
+        customerName: raw.customerName,
+        itemDescription: raw.itemDescription
+    });
+}
+
+/** Show label after successful job submit (only from saved batch — no pre-submit peek). */
+async function showPostSubmitProcessLabel(completedJob, saveResult) {
+    if (!saveResult?.success || saveResult.duplicate) return false;
+    if (!completedJob?.isEmbossing && !completedJob?.usesProcessInputs) return false;
+    const batch = saveResult.batch_num || completedJob.batchNum;
+    if (!batch) return false;
+    wireProcessLabelModalListeners();
+    try {
+        const po = completedJob.poNumber || completedJob.jobNumber;
+        let labelData;
+        try {
+            labelData = await fetchProcessLabelData(po, batch);
+        } catch (fetchErr) {
+            console.warn('Label fetch from DB, using submit payload:', fetchErr.message);
+            if (typeof ProcessLabelFormats === 'undefined') return false;
+            labelData = ProcessLabelFormats.buildLabelDataFromFinish({
+                job: completedJob,
+                machineInfo,
+                poNumber: po,
+                outputBatch: batch,
+                actualOutput: completedJob.sheetsProcessed,
+                roleUsages: completedJob.roleUsages || [],
+                operator: completedJob.operator || getOperatorForSubmission() || 'Unknown',
+                customerName: completedJob.customerName
+            });
+        }
+        if (labelData.packedOn && completedJob.completedAt) {
+            const dt = new Date(completedJob.completedAt);
+            if (!isNaN(dt)) labelData.packedOn = dt.toLocaleDateString('en-IN');
+        }
+        showProcessLabelPreviewModal(labelData, null, null);
+        return true;
+    } catch (e) {
+        console.warn('Post-submit label:', e);
+        return false;
+    }
 }
 
 function saveProcessLabelLocally(labelData) {
@@ -1200,15 +1286,79 @@ function cancelProcessLabelPreview() {
     closeModal('process-label-modal-overlay');
     _processLabelSubmitCallback = null;
     window._pendingProcessLabelData = null;
-    if (window._labelPreviewFromFinish) {
-        window._labelPreviewFromFinish = false;
-        showModal('finish-modal-overlay');
-        return;
+    window._pendingCompletedJobForLabel = null;
+    window._labelPreviewFromFinish = false;
+    completeDeferredJobFinishUi();
+}
+
+/** Return to machine screen only after submit succeeded (and label closed if shown). */
+function completeDeferredJobFinishUi() {
+    if (!_deferredJobFinishReset) return;
+    const { completedJob } = _deferredJobFinishReset;
+    _deferredJobFinishReset = null;
+    applyJobFinishMachineReset(completedJob);
+    setFinishSubmitBusy(false);
+    document.getElementById('finish-job-form')?.reset();
+}
+
+function applyJobFinishMachineReset(completedJob) {
+    activeJobNumber = null;
+    activeJobState = null;
+    selectedJob = null;
+
+    if (typeof LiveTracking !== 'undefined') {
+        LiveTracking.jobUnload();
     }
-    if (window._pendingCompletedJobForLabel) {
-        pendingJobData = window._pendingCompletedJobForLabel;
-        window._pendingCompletedJobForLabel = null;
+
+    updatePOInputState();
+
+    currentMachineState = null;
+    timerSeconds = 0;
+    if (timerInterval) {
+        clearInterval(timerInterval);
+        timerInterval = null;
     }
+
+    renderJobQueue(currentJobs);
+    updateTimerDisplay();
+    updateFooterStats();
+
+    const jobNumberEl = document.getElementById('selected-job-number');
+    if (jobNumberEl) jobNumberEl.textContent = '--';
+
+    const jobNameEl = document.getElementById('selected-job-name');
+    if (jobNameEl) jobNameEl.textContent = 'Select a job from "Search PO"';
+
+    const itemNoEl = document.getElementById('selected-job-itemno');
+    if (itemNoEl) itemNoEl.textContent = '-';
+
+    const quantityEl = document.getElementById('selected-job-quantity');
+    if (quantityEl) quantityEl.textContent = '-';
+
+    const statusEl = document.getElementById('selected-job-status');
+    if (statusEl) statusEl.textContent = 'No Job Selected';
+
+    const stateLabel = document.getElementById('current-state-label');
+    if (stateLabel) stateLabel.textContent = 'Select a job to start tracking';
+
+    document.querySelectorAll('.control-btn').forEach((btn) => {
+        btn.classList.remove('active');
+    });
+
+    currentJobId = null;
+    stateStartTimestamp = null;
+    accumulatedStateTime = 0;
+
+    persistShiftOperator();
+    saveStateToStorage();
+    updateShiftFooterDisplay();
+    updateClockButtonUI();
+
+    console.log('✅ Job finished. Timers preserved for shift:', {
+        makeready: formatTime(stateTimers.makeready),
+        running: formatTime(stateTimers.running),
+        job: completedJob?.jobNumber
+    });
 }
 
 function printProcessLabelOnThisDevice() {
@@ -2624,16 +2774,17 @@ document.addEventListener('DOMContentLoaded', function () {
         const urlParams = new URLSearchParams(window.location.search);
         const process = urlParams.get('process');
         const machine = urlParams.get('machine');
+        const canonicalMachine = formatMachineName(machine);
 
-        // Store machine info for database operations
-        machineInfo.name = machine;
+        // Store machine info for database operations (display/save: Slitting-1 not slitting-1)
+        machineInfo.name = canonicalMachine || machine;
         machineInfo.process = process;
 
         // Live tracking: identify this machine to the server
         if (machine && typeof LiveTracking !== 'undefined') {
             LiveTracking.configure({
                 machineId: machine,
-                machineName: machine,
+                machineName: canonicalMachine || machine,
                 process: process || null
             });
         }
@@ -2653,7 +2804,7 @@ document.addEventListener('DOMContentLoaded', function () {
             updateClockButtonUI();
         }
         
-        updateMachineInfo(process, machine);
+        updateMachineInfo(process, machineInfo.name);
         document.querySelector('.estimates-card')?.remove();
         renderJobQueue(currentJobs);
         setupEventListeners();
@@ -2820,7 +2971,17 @@ function updateMachineInfo(process, machine) {
 }
 
 function formatMachineName(machine) {
-    return machine.split('-').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+    if (!machine) return '';
+    return String(machine)
+        .trim()
+        .split('-')
+        .map((word) => {
+            const w = word.trim();
+            if (!w) return '';
+            return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+        })
+        .filter(Boolean)
+        .join('-');
 }
 
 function formatProcessName(process) {
@@ -5806,9 +5967,7 @@ function setupEventListeners() {
         finishCancelBtn.addEventListener('click', () => closeModal('finish-modal-overlay'));
     }
 
-    document.getElementById('finish-preview-label-btn')?.addEventListener('click', () => {
-        previewFinishJobLabel();
-    });
+    document.getElementById('finish-preview-label-btn')?.remove();
 
     const backButton = document.getElementById('back-button');
     if (backButton) {
@@ -7033,13 +7192,11 @@ function showTicketErrorNotification(message) {
 
 function setFinishSubmitBusy(busy) {
     const submitBtn = document.getElementById('finish-submit-btn');
-    const previewBtn = document.getElementById('finish-preview-label-btn');
     const cancelBtn = document.getElementById('finish-cancel-btn');
     if (submitBtn) {
         submitBtn.disabled = busy;
-        submitBtn.textContent = busy ? 'Submitting...' : 'Submit';
+        submitBtn.textContent = busy ? 'Saving job…' : 'Submit';
     }
-    if (previewBtn) previewBtn.disabled = busy;
     if (cancelBtn) cancelBtn.disabled = busy;
     const form = document.getElementById('finish-job-form');
     if (form) {
@@ -7292,10 +7449,6 @@ function configureFinishModalFields() {
     const finishSubmitBtn = document.getElementById('finish-submit-btn');
     if (finishSubmitBtn) {
         finishSubmitBtn.textContent = 'Submit';
-    }
-    const finishPreviewBtn = document.getElementById('finish-preview-label-btn');
-    if (finishPreviewBtn) {
-        finishPreviewBtn.style.display = unit1Finish ? '' : 'none';
     }
 
     console.log(`📋 Modal configured for: ${machineInfo.name} (Lamination: ${isLaminationMachine()}, Folding: ${isFoldingPastingMachine()}, Narendra: ${isNarendraMachine()}, Embossing: ${embossingFinish})`);
@@ -7674,10 +7827,8 @@ async function handleFinishJob(e) {
         setFinishSubmitBusy(true);
         try {
             await submitUnit1FinishJob(pendingJobData);
-            e.target.reset();
         } catch (err) {
             alert('❌ Submit failed: ' + (err.message || err));
-        } finally {
             setFinishSubmitBusy(false);
         }
         return;
@@ -7690,7 +7841,6 @@ async function handleFinishJob(e) {
 
 async function submitUnit1FinishJob(jobData) {
     if (_jobSubmitInProgress) return;
-    _jobSubmitInProgress = true;
     const tb = jobData.timeBreakdown || {};
     const makereadySeconds = Math.max(tb.makeready || 0, stateTimers.makeready || 0);
     let runningSeconds = Math.max(tb.running || 0, stateTimers.running || 0);
@@ -7698,54 +7848,7 @@ async function submitUnit1FinishJob(jobData) {
         runningSeconds = timerSeconds;
     }
     const operatorForJob = getOperatorForSubmission();
-    try {
-        await finalizeCompletedJob(jobData, makereadySeconds, runningSeconds, operatorForJob, null, null);
-    } finally {
-        _jobSubmitInProgress = false;
-    }
-}
-
-async function previewFinishJobLabel() {
-    if (!selectedJob || typeof ProcessLabelFormats === 'undefined') return;
-    if (!usesUnit1ProcessInputs(selectedJob)) return;
-    if (!validateFinishInputUsages()) return;
-    const roleUsages = collectFinishInputUsages();
-    const actualOutput = parseFloat(document.getElementById('sheets-processed')?.value) || 0;
-    if (actualOutput <= 0) {
-        alert('❌ Enter Actual Output (KGS) before previewing the label');
-        return;
-    }
-    const roleUsed = roleUsages.reduce((s, r) => s + r.quantity_used, 0);
-    if (isEmbossingJob(selectedJob) && actualOutput + 1e-6 < roleUsed) {
-        alert('❌ Actual Output cannot be less than total inputs used (embossing only)');
-        return;
-    }
-    try {
-        const peekJob = {
-            poNumber: selectedJob.poNumber || selectedJob.jobNumber,
-            itemNo: selectedJob.itemNo || '',
-            uPCode: selectedJob.uPCode || '',
-            jobStartTime: selectedJob.jobStartTime || getISTTimestamp(),
-            machine_name: machineInfo?.name || ''
-        };
-        const outputBatch = await peekProcessOutputBatch(peekJob);
-        const labelData = ProcessLabelFormats.buildLabelDataFromFinish({
-            job: selectedJob,
-            machineInfo,
-            poNumber: peekJob.poNumber,
-            outputBatch,
-            actualOutput,
-            roleUsages,
-            operator: getOperatorForSubmission() || 'Unknown',
-            customerName: selectedJob.customerName
-        });
-        window._labelPreviewFromFinish = true;
-        closeModal('finish-modal-overlay');
-        wireProcessLabelModalListeners();
-        showProcessLabelPreviewModal(labelData, null, null);
-    } catch (err) {
-        alert('Could not preview label: ' + (err.message || err));
-    }
+    await finalizeCompletedJob(jobData, makereadySeconds, runningSeconds, operatorForJob, null, null);
 }
 
 // Helper functions for time conversion
@@ -8009,150 +8112,51 @@ async function confirmJobFinish() {
     pendingJobData = null;
     const operatorForJob = getOperatorForSubmission();
 
-    if (completedJob.isEmbossing || completedJob.usesProcessInputs) {
-        try {
-            const outputBatch = await peekProcessOutputBatch(completedJob);
-            const labelData = typeof ProcessLabelFormats !== 'undefined'
-                ? ProcessLabelFormats.buildLabelDataFromFinish({
-                    job: selectedJob || completedJob,
-                    machineInfo,
-                    poNumber: completedJob.poNumber || completedJob.jobNumber,
-                    outputBatch,
-                    actualOutput: completedJob.sheetsProcessed,
-                    roleUsages: completedJob.roleUsages || [],
-                    operator: operatorForJob || 'Unknown',
-                    customerName: completedJob.customerName
-                })
-                : {
-                    poNumber: completedJob.poNumber || completedJob.jobNumber,
-                    processName: machineInfo?.process || 'Embossing',
-                    outputBatch,
-                    actualOutput: completedJob.sheetsProcessed,
-                    rolesUsed: completedJob.roleUsages || [],
-                    operator: operatorForJob || 'Unknown',
-                    packedOn: new Date().toLocaleDateString('en-IN')
-                };
-            completedJob._previewOutputBatch = outputBatch;
-            releaseConfirmBtn();
-            const summaryConfirmLabel = confirmBtn ? confirmBtn.textContent : 'Confirm';
-            if (confirmBtn) confirmBtn.textContent = summaryConfirmLabel;
-            showProcessLabelPreviewModal(labelData, async () => {
-                await finalizeCompletedJob(completedJob, makereadySeconds, runningSeconds, operatorForJob, confirmBtn, confirmBtnLabel);
-            }, completedJob);
-            return;
-        } catch (peekErr) {
-            alert('Could not preview output batch: ' + peekErr.message);
-            pendingJobData = completedJob;
-            releaseConfirmBtn();
-            return;
-        }
-    }
-
     await finalizeCompletedJob(completedJob, makereadySeconds, runningSeconds, operatorForJob, confirmBtn, confirmBtnLabel);
 }
 
 async function finalizeCompletedJob(completedJob, makereadySeconds, runningSeconds, operatorForJob, confirmBtn, confirmBtnLabel) {
     if (confirmBtn) {
         confirmBtn.disabled = true;
-        confirmBtn.textContent = 'Saving...';
+        confirmBtn.textContent = 'Saving job…';
     }
     _jobSubmitInProgress = true;
 
-    const saveResult = await completeJobInDatabase(
-        completedJob,
-        makereadySeconds,
-        runningSeconds,
-        operatorForJob
-    );
+    let saveResult;
+    try {
+        saveResult = await completeJobInDatabase(
+            completedJob,
+            makereadySeconds,
+            runningSeconds,
+            operatorForJob
+        );
+    } catch (saveErr) {
+        _jobSubmitInProgress = false;
+        if (confirmBtn) {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = confirmBtnLabel || 'Confirm';
+        }
+        throw saveErr;
+    }
 
-    // Add to completed jobs (session + persisted list for summary)
+    if (saveResult?.success === false) {
+        _jobSubmitInProgress = false;
+        if (confirmBtn) {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = confirmBtnLabel || 'Confirm';
+        }
+        alert(`❌ Job ${completedJob.jobNumber} could not be saved.\n\n${saveResult.error || 'Unknown error'}`);
+        throw new Error(saveResult.error || 'Save failed');
+    }
+
     completedJobs.push(completedJob);
     sessionCompletedJobs.push(completedJob);
     saveShiftSessionToStorage();
-
-    // Remove from current jobs
     removeJobFromQueue(completedJob.jobNumber);
-
-    // Clear active job tracking
-    activeJobNumber = null;
-    activeJobState = null;
-    selectedJob = null;
-
-    // Live tracking: job finished -> clear loaded job (machine returns to idle)
-    if (typeof LiveTracking !== 'undefined') {
-        LiveTracking.jobUnload();
-    }
-    
-    // Re-enable PO input after job is finished
-    updatePOInputState();
-
-    // DON'T reset makeready and running - they persist across jobs until shift change
-    // Only reset other state timers
-    // Note: We're NOT resetting these timers, so they continue from where they left off
-    // stateTimers.lunch = 0;
-    // stateTimers.cleaning = 0;
-    // etc...
-    // These will continue accumulating across multiple jobs within the same shift
-
-    // Reset current state and timer display
-    currentMachineState = null;
-    timerSeconds = 0;
-    if (timerInterval) {
-        clearInterval(timerInterval);
-        timerInterval = null;
-    }
-
-    console.log('✅ Job finished. Timers preserved for shift:', {
-        makeready: formatTime(stateTimers.makeready),
-        running: formatTime(stateTimers.running)
-    });
-
-    // Update UI
     renderJobQueue(currentJobs);
-    updateTimerDisplay();
-    updateFooterStats();
 
-    // Clear job details display
-    const jobNumberEl = document.getElementById('selected-job-number');
-    if (jobNumberEl) jobNumberEl.textContent = '--';
-
-    const jobNameEl = document.getElementById('selected-job-name');
-    if (jobNameEl) jobNameEl.textContent = 'Select a job from "Search PO"';
-
-    const itemNoEl = document.getElementById('selected-job-itemno');
-    if (itemNoEl) itemNoEl.textContent = '-';
-
-    const quantityEl = document.getElementById('selected-job-quantity');
-    if (quantityEl) quantityEl.textContent = '-';
-
-    const statusEl = document.getElementById('selected-job-status');
-    if (statusEl) statusEl.textContent = 'No Job Selected';
-
-    const stateLabel = document.getElementById('current-state-label');
-    if (stateLabel) stateLabel.textContent = 'Select a job to start tracking';
-
-    // Remove active state from all buttons
-    document.querySelectorAll('.control-btn').forEach(btn => {
-        btn.classList.remove('active');
-    });
-
-    // Close both modals
     closeModal('job-summary-modal-overlay');
     closeModal('finish-modal-overlay');
-
-    currentJobId = null;
-    
-    // Clear timestamp tracking
-    stateStartTimestamp = null;
-    accumulatedStateTime = 0;
-
-    // Keep operator on screen and in storage until clock out
-    persistShiftOperator();
-    
-    // Save updated state to localStorage (includes operator + shiftLoginAt)
-    saveStateToStorage();
-    updateShiftFooterDisplay();
-    updateClockButtonUI();
 
     const qtyLine = `Output: ${formatIssueKgsDisplay(completedJob.sheetsProcessed)} KGS · Wastage: ${formatIssueKgsDisplay(completedJob.wastedSheets)} KGS`;
     if (saveResult?.duplicate) {
@@ -8162,6 +8166,8 @@ async function finalizeCompletedJob(completedJob, makereadySeconds, runningSecon
             type: 'info',
             duration: 6000
         });
+        _deferredJobFinishReset = { completedJob };
+        completeDeferredJobFinishUi();
     } else if (saveResult?.success && saveResult.sapPosted) {
         let successMsg = `${qtyLine}`;
         if (saveResult.autoIssue?.success) {
@@ -8172,6 +8178,11 @@ async function finalizeCompletedJob(completedJob, makereadySeconds, runningSecon
             message: `Job ${completedJob.jobNumber} completed.<br>${successMsg}`,
             duration: saveResult.autoIssue?.success ? 9000 : 7000
         });
+        _deferredJobFinishReset = { completedJob };
+        const labelShown = await showPostSubmitProcessLabel(completedJob, saveResult);
+        if (!labelShown) {
+            completeDeferredJobFinishUi();
+        }
     } else if (saveResult?.success && saveResult.sapPosted === false) {
         const sapErr = String(saveResult.sapError || 'Unknown error');
         const unit1Job = isUnit1HolographicJob(completedJob);
@@ -8187,10 +8198,15 @@ async function finalizeCompletedJob(completedJob, makereadySeconds, runningSecon
             hint +
             `\n\nData entry is saved in Shift Summary. Fix SAP setup above, then re-finish remaining qty or post manually in SAP.`
         );
-    } else if (saveResult?.success === false) {
-        alert(`❌ Job ${completedJob.jobNumber} could not be saved.\n\n${saveResult.error || 'Unknown error'}`);
+        _deferredJobFinishReset = { completedJob };
+        const labelShown = await showPostSubmitProcessLabel(completedJob, saveResult);
+        if (!labelShown) {
+            completeDeferredJobFinishUi();
+        }
     } else {
         alert(`⚠️ Job ${completedJob.jobNumber} finished on screen.\n\n${qtyLine}\n\nCould not confirm server save — check console.`);
+        _deferredJobFinishReset = { completedJob };
+        completeDeferredJobFinishUi();
     }
 
     console.log('Job confirmed and finished:', completedJob, saveResult);

@@ -117,7 +117,6 @@ function initializeElements() {
     elements.labelPreviewBrowserPrintBtn = document.getElementById('label-preview-browser-print-btn');
     elements.labelPreviewPrintBtn = document.getElementById('label-preview-print-btn');
     elements.labelPrintStatusExtra = document.getElementById('label-print-status-extra');
-    elements.previewSlipBtn = document.getElementById('preview-slip-btn');
 }
 
 // Setup event listeners
@@ -148,10 +147,6 @@ function setupEventListeners() {
     // Clear form button
     if (elements.clearFormBtn) {
         elements.clearFormBtn.addEventListener('click', clearForm);
-    }
-
-    if (elements.previewSlipBtn) {
-        elements.previewSlipBtn.addEventListener('click', handlePreviewPackingSlip);
     }
 
     document.getElementById('fg-input-add-btn')?.addEventListener('click', addFgInputFromSelect);
@@ -369,6 +364,13 @@ function formatKgsDisplay(n) {
     return Math.abs(v - Math.round(v)) < 0.001 ? String(Math.round(v)) : v.toFixed(2);
 }
 
+function isFgProcessBatch(r) {
+    const batch = String(r.batch_number || '').trim();
+    if (!batch) return false;
+    if (r.input_type === 'raw_roll') return false;
+    return r.input_type === 'process_batch' || !batch.toUpperCase().startsWith('PMI');
+}
+
 async function loadFgInputBatches(job) {
     const po = String(job?.jobNumber || '').trim();
     if (!po) {
@@ -384,15 +386,21 @@ async function loadFgInputBatches(job) {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         const roles = (data.success && Array.isArray(data.roles)) ? data.roles : [];
-        const byBatch = new Map();
+        const byKey = new Map();
         for (const r of roles) {
-            const key = String(r.batch_number || r.issue_id || '');
-            if (!key) continue;
-            if (!byBatch.has(key)) {
-                byBatch.set(key, { ...r, issue_id: r.issue_id ?? r.batch_number });
+            const batch = String(r.batch_number || '').trim();
+            if (!batch) continue;
+            const sourcePo = String(r.source_po_num || '').trim();
+            if (isFgProcessBatch(r) && !sourcePo) continue;
+            const key = sourcePo ? `${sourcePo}:${batch}` : batch;
+            if (!byKey.has(key)) {
+                byKey.set(key, {
+                    ...r,
+                    issue_id: r.issue_id ?? (sourcePo ? `${sourcePo}:${batch}` : batch)
+                });
             }
         }
-        fgInputRoles = Array.from(byBatch.values());
+        fgInputRoles = Array.from(byKey.values());
         console.log(`📋 FG inputs loaded: ${fgInputRoles.length} batch(es) for PO ${po}`);
     } catch (e) {
         console.warn('Failed to load FG process inputs:', e);
@@ -412,7 +420,8 @@ function populateFgInputDropdown() {
         if (selectedKeys.has(String(r.issue_id))) continue;
         const opt = document.createElement('option');
         opt.value = String(r.issue_id);
-        opt.textContent = `${r.batch_number} — avail ${formatKgsDisplay(r.remaining_qty)}${currentInventoryUOM ? ` ${currentInventoryUOM}` : ' KGS'}`;
+        const poHint = r.source_po_num ? ` · PO ${r.source_po_num}` : '';
+        opt.textContent = `${r.batch_number}${poHint} — avail ${formatKgsDisplay(r.remaining_qty)}${currentInventoryUOM ? ` ${currentInventoryUOM}` : ' KGS'}`;
         sel.appendChild(opt);
         added++;
     }
@@ -772,44 +781,42 @@ function showSuccess(payload, result) {
     const numLabels = result.labelsCount || 1;
 
     lastSubmittedEntry = {
-        customerName: currentJobData?.customerName || '',
-        customerCode: currentJobData?.customerCode || '',
-        itemDescription: currentJobData?.jobName || '',
-        fgCode: currentJobData?.itemNo || '',
-        itemCodeLabel: currentJobData?.itemCodeLabel || '',
-        jobNo: payload.jobNo,
-        quantity: payload.fgQuantity,
-        totalQuantity: payload.fgQuantity,
-        inventoryUOM: payload.inventoryUOM || currentInventoryUOM || 'KGS',
-        packedOn: formatDateForLabel(new Date()),
-        operator: formatLabelOperatorField(payload.qcSupervisor, payload.operatorName),
-        batchNo: result.batchNumber || '',
+        customerName: result.labelData?.customerName || currentJobData?.customerName || '',
+        customerCode: result.labelData?.customerCode || currentJobData?.customerCode || '',
+        itemDescription: result.labelData?.itemDescription || currentJobData?.jobName || '',
+        fgCode: result.labelData?.fgCode || currentJobData?.itemNo || '',
+        itemCodeLabel: result.labelData?.itemCodeLabel || currentJobData?.itemCodeLabel || '',
+        jobNo: result.labelData?.jobNo || payload.jobNo,
+        quantity: result.labelData?.quantity ?? payload.fgQuantity,
+        totalQuantity: result.labelData?.totalQuantity ?? payload.fgQuantity,
+        inventoryUOM: result.labelData?.inventoryUOM || payload.inventoryUOM || currentInventoryUOM || 'KGS',
+        packedOn: result.labelData?.packedOn || formatDateForLabel(new Date()),
+        operator: result.labelData?.operator || formatLabelOperatorField(payload.qcSupervisor, payload.operatorName),
+        batchNo: result.batchNumber || result.labelData?.batchNo || '',
         numLabels
     };
     
     // Determine print status
     let printStatusHTML = '';
-    if (result.printResult) {
-        if (result.printResult.success) {
+    if (result.printResult?.previewPending) {
+        printStatusHTML = `
+            <div style="color: #38bdf8;">
+                <strong>🖨️ Packing slip:</strong> Saved — preview opens below. Print or skip.
+            </div>
+        `;
+    } else if (result.printResult?.success) {
             printStatusHTML = `
                 <div style="color: #22c55e; font-weight: bold;">
                     <strong>🖨️ Labels Printed:</strong> ${result.printResult.printed}/${result.printResult.total} ✅
                 </div>
             `;
-        } else if (result.printResult.previewPending) {
-            printStatusHTML = `
-                <div style="color: #38bdf8;">
-                    <strong>🖨️ Label printer:</strong> Preview the layout, then send to Zebra or skip.
-                </div>
-            `;
-        } else {
-            printStatusHTML = `
-                <div style="color: #f59e0b;">
-                    <strong>🖨️ Auto-Print:</strong> ${result.printResult.message || 'Not available'}
-                </div>
-                <div style="font-size: 0.85em; color: #94a3b8;">Use "Reprint Labels" button for manual printing</div>
-            `;
-        }
+    } else if (result.printResult) {
+        printStatusHTML = `
+            <div style="color: #f59e0b;">
+                <strong>🖨️ Auto-Print:</strong> ${result.printResult.message || 'Not available'}
+            </div>
+            <div style="font-size: 0.85em; color: #94a3b8;">Use "Reprint Labels" button for manual printing</div>
+        `;
     }
 
     // Show SAP posting status clearly (FG can be saved locally even if SAP posting fails)
@@ -843,15 +850,7 @@ function showSuccess(payload, result) {
     }
     
     showSection('success');
-
-    // If server requested preview-before-print, show preview modal
-    if (result.printResult?.previewPending) {
-        if (elements.labelPrintStatusExtra) {
-            elements.labelPrintStatusExtra.style.display = 'none';
-            elements.labelPrintStatusExtra.innerHTML = '';
-        }
-        showLabelPreviewModal();
-    }
+    showLabelPreviewModal();
 }
 
 function hideLabelPreviewModal() {
@@ -865,7 +864,7 @@ function showLabelPreviewModal() {
     const n = lastSubmittedEntry.numLabels;
     if (elements.labelPreviewHint) {
         elements.labelPreviewHint.textContent =
-            `Packing slip preview — total FG quantity in ${lastSubmittedEntry.inventoryUOM || 'KGS'}.`;
+            `Entry saved. Packing slip — total FG quantity in ${lastSubmittedEntry.inventoryUOM || 'KGS'}. Print or close.`;
     }
     if (elements.labelPreviewHost) {
         elements.labelPreviewHost.innerHTML =
@@ -906,37 +905,6 @@ async function buildLabelDataFromCurrentForm(batchNo = '') {
         operator: formatLabelOperatorField(formData.qcSupervisor, formData.operatorName),
         batchNo: batchNo || ''
     };
-}
-
-/** Preview / reprint packing slip without re-submitting to SAP. */
-async function handlePreviewPackingSlip() {
-    if (!currentJobData?.jobNumber) {
-        alert('Please search a production order first.');
-        return;
-    }
-
-    const formData = getFormData();
-    if (!formData.fgQuantity || formData.fgQuantity <= 0) {
-        alert('Please enter FG Quantity first.');
-        return;
-    }
-    if (!formData.qcSupervisor) {
-        alert('Please select QC Supervisor (shown on label).');
-        return;
-    }
-    if (!formData.operatorName) {
-        alert('Please enter Operator name (shown on label).');
-        return;
-    }
-
-    const batchNo = await fetchLastBatchForPo(currentJobData.jobNumber);
-    const labelData = await buildLabelDataFromCurrentForm(batchNo);
-    lastSubmittedEntry = {
-        ...labelData,
-        numLabels: 1
-    };
-
-    showLabelPreviewModal();
 }
 
 function getLabelQuantityLabel(data) {

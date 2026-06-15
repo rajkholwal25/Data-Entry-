@@ -7,6 +7,7 @@
     <title>Unit 1 - Holographic Data Entry System</title>
     <meta name="description" content="Data entry system for Unit 1 (Holographic) post-press processes">
     <link rel="stylesheet" href="index.css">
+    <link rel="stylesheet" href="label-sap-styles.css">
 </head>
 
 <body>
@@ -41,6 +42,7 @@
             <div class="trace-mode-tabs">
                 <button type="button" class="trace-mode-tab active" data-mode="po">Search by PO</button>
                 <button type="button" class="trace-mode-tab" data-mode="batch">Search by Batch Number</button>
+                <button type="button" class="trace-mode-tab" data-mode="label">Process Label</button>
             </div>
 
             <div class="trace-search-panel active" id="trace-panel-po">
@@ -53,7 +55,14 @@
                 <input id="trace-batch-input" type="text" placeholder="Output batch (e.g. PET-45-1001-HF-SLT-002)" aria-label="Output batch number" />
                 <button type="button" class="trace-btn-primary" id="trace-search-batch-btn">Search Batch</button>
             </div>
+
+            <div class="trace-search-panel trace-search-panel-batch" id="trace-panel-label">
+                <input id="trace-label-po-input" type="text" inputmode="numeric" placeholder="PO Number (required)" aria-label="PO number for label" />
+                <input id="trace-label-batch-input" type="text" placeholder="Output batch (optional — latest if blank)" aria-label="Output batch for label" />
+                <button type="button" class="trace-btn-primary" id="trace-search-label-btn">Generate Label</button>
+            </div>
             <p class="trace-batch-hint" id="trace-batch-hint">Batch trace: enter output batch — PO auto-fills from the job that produced it (e.g. SLT-002 → PO 755, not 753).</p>
+            <p class="trace-batch-hint" id="trace-label-hint" style="display:none">Process label: PO + output batch (batch optional = latest saved). Uses data saved at report completion only — no preview-before-submit.</p>
 
             <div class="trace-status" id="trace-status"></div>
 
@@ -70,7 +79,16 @@
                 </div>
             </div>
 
-            <div id="trace-results"></div>
+            <div class="trace-body" id="trace-body">
+                <div class="trace-main" id="trace-results"></div>
+                <aside class="trace-label-side" id="trace-label-side" aria-label="Process label preview">
+                    <div class="trace-label-side-head">🏷️ Process Label</div>
+                    <div id="trace-label-preview-host" class="trace-label-preview-host">
+                        <p class="trace-label-placeholder">Enter PO and click Generate Label</p>
+                    </div>
+                    <div class="trace-label-actions" id="trace-label-actions"></div>
+                </aside>
+            </div>
         </section>
 
         <!-- Unit 1 - Holographic Machines -->
@@ -209,8 +227,11 @@
         </div>
     </div>
 
+    <div id="trace-label-print-container" class="trace-label-print-container" aria-hidden="true"></div>
+
+    <script src="process-label-formats.js"></script>
     <script src="index.js"></script>
-    <script src="traceability.js?v=20260613a"></script>
+    <script src="traceability.js?v=20260615b"></script>
 </body>
 
 </html>

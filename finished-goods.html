@@ -212,9 +212,6 @@
                         <button type="button" class="btn btn-secondary" id="clear-form-btn">
                             <span>🔄</span> Clear Form
                         </button>
-                        <button type="button" class="btn btn-secondary" id="preview-slip-btn">
-                            <span>🖨️</span> Preview Packing Slip
-                        </button>
                         <button type="submit" class="btn btn-primary" id="submit-btn">
                             <span>✅</span> Submit FG Entry
                         </button>
@@ -245,7 +242,7 @@
     <!-- Label Print Container (hidden, used for printing) -->
     <div id="label-print-container" style="display: none;"></div>
 
-    <!-- Label preview before Zebra print (when FG_LABEL_PREVIEW_BEFORE_PRINT=true on server) -->
+    <!-- Label preview after successful FG submit (print via POST /api/fg-print-labels) -->
     <div class="modal-overlay label-preview-modal-overlay" id="label-preview-modal" style="display: none;">
         <div class="modal-content label-preview-modal-content">
             <div class="modal-header">

@@ -55,8 +55,11 @@ const {
     getOutputBatchOwnerPO,
     outputBatchBelongsToPO,
     getPOTraceabilitySummary,
+    getProcessLabelDataFromDB,
+    listOutputBatchesForPO,
     derivePrevProcessInputItemCode,
     getPreviousUnit1ProcessTag,
+    formatMachineDisplayName,
     isTerminalUnit1Process,
     isDownstreamUnit1Process
 } = require('./db-config');
@@ -5731,6 +5734,13 @@ app.post('/api/job-complete', async (req, res) => {
             });
         }
 
+        if (jobData.machine_name) {
+            jobData.machine_name = formatMachineDisplayName(jobData.machine_name);
+        }
+        if (jobData.machineName) {
+            jobData.machineName = formatMachineDisplayName(jobData.machineName);
+        }
+
         // Validate quantities if provided
         if (jobData.quantity_processed !== undefined || jobData.sheets_wasted !== undefined) {
             const quantityResult = validateQuantities({
@@ -7160,6 +7170,38 @@ app.get('/api/traceability/by-batch/:batchNum', async (req, res) => {
         });
     } catch (error) {
         console.error('Traceability by-batch error:', error.message);
+        return res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+/**
+ * GET /api/process-label/by-po/:poNum?batch=…&list=1
+ * Build process output label from saved DB data (post-submit / reprint).
+ */
+app.get('/api/process-label/by-po/:poNum', async (req, res) => {
+    try {
+        const poNum = String(req.params.poNum || '').trim();
+        if (!poNum) {
+            return res.status(400).json({ success: false, message: 'PO number is required' });
+        }
+        if (String(req.query.list || '') === '1') {
+            const batches = await listOutputBatchesForPO(poNum);
+            return res.json({ success: true, poNum, batches });
+        }
+        const batch = String(req.query.batch || req.query.batch_num || '').trim() || null;
+        await backfillRoleBatchUsageOperators(poNum);
+        const raw = await getProcessLabelDataFromDB(poNum, batch);
+        if (!raw) {
+            return res.status(404).json({
+                success: false,
+                message: batch
+                    ? `No saved output batch ${batch} for PO ${poNum}`
+                    : `No saved production batch for PO ${poNum}`
+            });
+        }
+        return res.json({ success: true, poNum, labelData: raw });
+    } catch (error) {
+        console.error('Process label lookup error:', error.message);
         return res.status(500).json({ success: false, message: error.message });
     }
 });
@@ -8850,16 +8892,12 @@ app.post('/api/fg-entry', async (req, res) => {
             batchNo: batchNumber || ''
         };
 
-        let printResult = { success: false, message: 'Printing not attempted', printed: 0 };
-        if (FG_LABEL_PREVIEW_BEFORE_PRINT) {
-            printResult = { success: false, message: 'Awaiting preview confirmation', printed: 0, previewPending: true };
-        } else {
-            try {
-                printResult = await printFGLabels(labelData, numLabels);
-            } catch (printError) {
-                printResult = { success: false, message: printError.message, printed: 0 };
-            }
-        }
+        let printResult = {
+            success: false,
+            message: 'Label available after submit',
+            printed: 0,
+            previewPending: true
+        };
 
         res.json({
             success: true,
