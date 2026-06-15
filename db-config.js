@@ -288,6 +288,14 @@ async function ensureSchema() {
         ALTER TABLE role_batch_usage
         ADD COLUMN IF NOT EXISTS machine_name VARCHAR(128)
     `);
+    await pool.query(`
+        ALTER TABLE material_issue_log
+        ADD COLUMN IF NOT EXISTS source_po_num VARCHAR(64)
+    `);
+    await pool.query(`
+        ALTER TABLE role_batch_usage
+        ADD COLUMN IF NOT EXISTS source_po_num VARCHAR(64)
+    `);
 
     try {
         await backfillRoleBatchUsageOperators();
@@ -374,6 +382,28 @@ function getPreviousUnit1ProcessTag(processTag) {
     const t = String(processTag || '').toUpperCase();
     const i = UNIT1_PROCESS_CHAIN.indexOf(t);
     return i <= 0 ? null : UNIT1_PROCESS_CHAIN[i - 1];
+}
+
+function getUnit1ProcessChainIndex(processTag) {
+    const i = UNIT1_PROCESS_CHAIN.indexOf(String(processTag || '').trim().toUpperCase());
+    return i >= 0 ? i : -1;
+}
+
+/** True when this step is FG / end of chain — no auto-issue to a next process PO. */
+function isTerminalUnit1Process(uPCode, itemCode) {
+    const u = String(uPCode || '').toUpperCase();
+    if (u.includes('FG') || u.includes('FINISHED')) return true;
+    const tag = getUnit1ProcessBatchTag(uPCode, null, null, itemCode);
+    const idx = getUnit1ProcessChainIndex(tag);
+    return idx >= getUnit1ProcessChainIndex('FG');
+}
+
+/** Next process must be later in EMB → MET → … → FG chain (blocks FG→EMB fresh starts). */
+function isDownstreamUnit1Process(nextTag, currentTag) {
+    const nextIdx = getUnit1ProcessChainIndex(nextTag);
+    const curIdx = getUnit1ProcessChainIndex(currentTag);
+    if (curIdx < 0 || nextIdx < 0) return true;
+    return nextIdx > curIdx;
 }
 
 // Test database connection
@@ -492,14 +522,17 @@ async function getUnit1BatchNum(itemCode, processTag, poNum, startTime, sapMaxSe
     }
 
     const likePrefix = `${prefix}%`;
+    const po = poNum != null ? String(poNum).trim() : '';
+    const seqParams = po ? [po, code, likePrefix.toUpperCase()] : [code, likePrefix.toUpperCase()];
+    const poClause = po ? 'po_num = ? AND ' : '';
     const [rows] = await pool.query(
         `SELECT batch_num FROM production_records
-         WHERE UPPER(fg_num) = ?
+         WHERE ${poClause}UPPER(fg_num) = ?
            AND UPPER(batch_num) LIKE ?
            AND RIGHT(batch_num, 3) ~ '^[0-9]+$'
          ORDER BY CAST(RIGHT(batch_num, 3) AS INTEGER) DESC
          LIMIT 1`,
-        [code, likePrefix.toUpperCase()]
+        seqParams
     );
 
     let localMax = 0;
@@ -507,7 +540,8 @@ async function getUnit1BatchNum(itemCode, processTag, poNum, startTime, sapMaxSe
         localMax = parseUnit1BatchSeq(rows[0].batch_num, code, tag) || 0;
     }
 
-    const nextSeq = Math.max(localMax, Number(sapMaxSeq) || 0) + 1;
+    // Per-PO sequence starts at 001; do not bump from global SAP/other-PO batches.
+    const nextSeq = po ? (localMax + 1) : (Math.max(localMax, Number(sapMaxSeq) || 0) + 1);
     if (nextSeq > 999) {
         throw new Error(`Batch sequence exceeded 999 for ${prefix}`);
     }
@@ -1141,7 +1175,8 @@ async function recordMaterialIssues(common, allocations) {
             ...common,
             batch_number: a.batch_number || a.batchNumber || a.batch || a.BatchNumber,
             quantity: a.quantity != null ? a.quantity : a.Quantity,
-            sap_doc_entry: a.sap_doc_entry || a.docEntry || common.sap_doc_entry
+            sap_doc_entry: a.sap_doc_entry || a.docEntry || common.sap_doc_entry,
+            source_po_num: a.source_po_num || a.sourcePoNum || common.source_po_num || null
         });
         if (id) count++;
     }
@@ -1159,8 +1194,8 @@ async function recordMaterialIssueIfAbsent(entry) {
         const [result] = await pool.query(
             `INSERT INTO material_issue_log
                 (po_num, absolute_entry, line_number, item_code, batch_number,
-                 quantity, warehouse, operator_name, machine_name, sap_doc_entry, output_batch, remarks)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 quantity, warehouse, operator_name, machine_name, sap_doc_entry, output_batch, remarks, source_po_num)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT (po_num, batch_number) DO UPDATE SET
                 quantity = GREATEST(material_issue_log.quantity, EXCLUDED.quantity),
                 sap_doc_entry = COALESCE(material_issue_log.sap_doc_entry, EXCLUDED.sap_doc_entry),
@@ -1171,6 +1206,7 @@ async function recordMaterialIssueIfAbsent(entry) {
                 absolute_entry = COALESCE(material_issue_log.absolute_entry, EXCLUDED.absolute_entry),
                 line_number = COALESCE(material_issue_log.line_number, EXCLUDED.line_number),
                 item_code = COALESCE(material_issue_log.item_code, EXCLUDED.item_code),
+                source_po_num = COALESCE(material_issue_log.source_po_num, EXCLUDED.source_po_num),
                 remarks = CASE
                     WHEN material_issue_log.remarks IS NULL OR material_issue_log.remarks LIKE '%Backfilled%'
                     THEN EXCLUDED.remarks ELSE material_issue_log.remarks END
@@ -1187,7 +1223,8 @@ async function recordMaterialIssueIfAbsent(entry) {
                 entry.machine_name || null,
                 entry.sap_doc_entry != null ? String(entry.sap_doc_entry) : null,
                 entry.output_batch || null,
-                entry.remarks || null
+                entry.remarks || null,
+                entry.source_po_num != null ? String(entry.source_po_num).trim() : null
             ]
         );
         return result.insertId;
@@ -1233,38 +1270,42 @@ async function getIssuedRolesWithRemaining(poNum) {
                 COALESCE(MAX(mil.quantity), 0) AS issued_qty,
                 MAX(mil.warehouse) AS warehouse,
                 MIN(mil.issued_at) AS issued_at,
+                MAX(mil.source_po_num) AS source_po_num,
                 COALESCE((
                     SELECT SUM(rbu.quantity_used)
                       FROM role_batch_usage rbu
                      WHERE rbu.po_num = mil.po_num
+                       AND rbu.input_batch_number = mil.batch_number
                        AND (
-                           rbu.input_batch_number = mil.batch_number
-                           OR rbu.issue_id IN (
-                               SELECT mil2.issue_id
-                                 FROM material_issue_log mil2
-                                WHERE mil2.po_num = mil.po_num
-                                  AND mil2.batch_number = mil.batch_number
-                           )
+                           mil.source_po_num IS NULL
+                           OR rbu.source_po_num IS NULL
+                           OR rbu.source_po_num = mil.source_po_num
                        )
                 ), 0) AS used_qty
            FROM material_issue_log mil
           WHERE mil.po_num = ?
-          GROUP BY mil.po_num, mil.batch_number
+          GROUP BY mil.po_num, mil.batch_number, mil.source_po_num
           ORDER BY MIN(mil.issued_at) ASC NULLS LAST, MIN(mil.issue_id) ASC`,
         [po]
     );
     return rows.map((r) => {
         const issued = Number(r.issued_qty) || 0;
         const used = Number(r.used_qty) || 0;
+        const sourcePo = r.source_po_num != null ? String(r.source_po_num).trim() : null;
+        const isProcess = Boolean(sourcePo);
         return {
-            issue_id: r.issue_id,
+            issue_id: isProcess
+                ? makeProcessBatchIssueId(sourcePo, r.batch_number)
+                : r.issue_id,
             batch_number: r.batch_number,
             item_code: r.item_code,
             issued_qty: issued,
             used_qty: used,
             remaining_qty: Math.max(0, issued - used),
             warehouse: r.warehouse,
-            issued_at: r.issued_at
+            issued_at: r.issued_at,
+            source_po_num: sourcePo,
+            input_type: isProcess ? 'process_batch' : 'raw_roll'
         };
     });
 }
@@ -1281,11 +1322,13 @@ async function recordRoleBatchUsages(poNum, outputBatch, usages, completionMeta 
         const inputType = String(u.input_type || u.inputType || '').trim()
             || (u.issue_id != null && Number.isFinite(Number(u.issue_id)) ? 'raw_roll' : 'process_batch');
         const issueId = inputType === 'raw_roll' && u.issue_id != null ? Number(u.issue_id) : null;
+        const sourcePo = u.source_po_num != null ? String(u.source_po_num).trim()
+            : (u.sourcePoNum != null ? String(u.sourcePoNum).trim() : null);
         await pool.query(
             `INSERT INTO role_batch_usage
                 (po_num, issue_id, input_batch_number, item_code, output_batch,
-                 quantity_used, input_type, operator_name, machine_name)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 quantity_used, input_type, operator_name, machine_name, source_po_num)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
                 String(poNum),
                 issueId,
@@ -1295,7 +1338,8 @@ async function recordRoleBatchUsages(poNum, outputBatch, usages, completionMeta 
                 qty,
                 inputType,
                 operatorName,
-                machineName
+                machineName,
+                sourcePo
             ]
         );
         count++;
@@ -1321,16 +1365,19 @@ async function linkIssuesToOutputBatch(issueIds, outputBatch) {
 }
 
 /** PO that produced this output batch (report completion on that PO). */
-async function getOutputBatchOwnerPO(outputBatch) {
+async function getOutputBatchOwnerPO(outputBatch, poNum = null) {
     const batch = String(outputBatch || '').trim();
+    const po = poNum != null ? String(poNum).trim() : '';
     if (!batch) return null;
+    const poParams = po ? [batch, po] : [batch];
+    const poClause = po ? ' AND po_num = ?' : '';
     const [prodRows] = await pool.query(
         `SELECT po_num, process_name
            FROM production_records
-          WHERE batch_num = ?
+          WHERE batch_num = ?${poClause}
           ORDER BY job_end_time DESC NULLS LAST, unique_id DESC
           LIMIT 1`,
-        [batch]
+        poParams
     );
     if (prodRows[0]?.po_num) {
         return {
@@ -1338,13 +1385,15 @@ async function getOutputBatchOwnerPO(outputBatch) {
             processName: prodRows[0].process_name || null
         };
     }
+    const rbuParams = po ? [batch, po] : [batch];
+    const rbuPoClause = po ? ' AND po_num = ?' : '';
     const [rbuRows] = await pool.query(
         `SELECT po_num FROM role_batch_usage
-          WHERE output_batch = ?
+          WHERE output_batch = ?${rbuPoClause}
           GROUP BY po_num
           ORDER BY MAX(created_at) DESC NULLS LAST
           LIMIT 1`,
-        [batch]
+        rbuParams
     );
     if (rbuRows[0]?.po_num) {
         return { poNum: String(rbuRows[0].po_num).trim(), processName: null };
@@ -1354,9 +1403,12 @@ async function getOutputBatchOwnerPO(outputBatch) {
 
 /** True only when this output batch was produced on the given PO. */
 async function outputBatchBelongsToPO(poNum, outputBatch) {
-    const owner = await getOutputBatchOwnerPO(outputBatch);
+    const po = String(poNum || '').trim();
+    const batch = String(outputBatch || '').trim();
+    if (!po || !batch) return false;
+    const owner = await getOutputBatchOwnerPO(batch, po);
     if (!owner?.poNum) return false;
-    return String(poNum || '').trim() === owner.poNum;
+    return po === owner.poNum;
 }
 
 /** Inputs consumed to produce an output batch (from report completion only). */
@@ -1725,6 +1777,26 @@ async function getPOTraceabilitySummary(poNum, options = {}) {
     };
 }
 
+/** Stable client/server id for previous-process batch (batch codes repeat per source PO). */
+function makeProcessBatchIssueId(sourcePoNum, batchNumber) {
+    const po = String(sourcePoNum || '').trim();
+    const batch = String(batchNumber || '').trim();
+    return po ? `${po}:${batch}` : batch;
+}
+
+/** FG item code for the previous process step (e.g. …-MET → …-EMB). */
+function derivePrevProcessInputItemCode(fgItemCode, prevTag) {
+    const prev = String(prevTag || '').trim().toUpperCase();
+    if (!prev) return null;
+    const code = String(fgItemCode || '').trim().toUpperCase();
+    if (!code) return null;
+    const curTag = inferUnit1ProcessTagFromItemCode(code);
+    const base = curTag && code.endsWith(`-${curTag}`)
+        ? code.slice(0, -(curTag.length + 1))
+        : code.replace(/-(EMB|MET|MTL|COT|SLT|REW)$/i, '');
+    return base ? `${base}-${prev}` : null;
+}
+
 /** Build LIKE pattern for previous-process output batches (e.g. PET-…-HF-EMB-%). */
 function buildPrevProcessBatchPattern(fgItemCode, prevTag) {
     const prev = String(prevTag || '').trim().toUpperCase();
@@ -1744,17 +1816,25 @@ function buildPrevProcessBatchPattern(fgItemCode, prevTag) {
  * Previous-process output batches for a PO chain (753 EMB outputs → inputs for 754 MET).
  * Sourced from production_records on the source PO(s), not the current PO.
  */
-async function getPreviousProcessOutputBatches(poNum, prevTag, fgItemCode) {
+async function getPreviousProcessOutputBatches(poNum, prevTag, fgItemCode, sourcePoNums = null) {
     const po = String(poNum || '').trim();
     const pattern = buildPrevProcessBatchPattern(fgItemCode, prevTag);
     if (!po || !pattern) return [];
+
+    const allowedPos = Array.isArray(sourcePoNums)
+        ? sourcePoNums.map((p) => String(p).trim()).filter(Boolean)
+        : [];
+    if (!allowedPos.length) return [];
+
+    const poPlaceholders = allowedPos.map(() => '?').join(', ');
+    const params = [pattern, ...allowedPos];
 
     const [rows] = await pool.query(
         `SELECT pr.batch_num AS batch_number,
                 MAX(pr.fg_num) AS item_code,
                 MAX(pr.quantity_processed) AS output_qty,
                 MIN(pr.job_start_time) AS produced_at,
-                MAX(pr.po_num) AS source_po_num,
+                pr.po_num AS source_po_num,
                 MAX(CASE WHEN pr.operator_name IS NOT NULL
                           AND TRIM(pr.operator_name) NOT IN ('', 'Operator', 'Unknown')
                      THEN pr.operator_name END) AS producer_operator,
@@ -1762,25 +1842,28 @@ async function getPreviousProcessOutputBatches(poNum, prevTag, fgItemCode) {
                      THEN pr.machine_name END) AS producer_machine
            FROM production_records pr
           WHERE pr.batch_num LIKE ?
-          GROUP BY pr.batch_num
-          ORDER BY pr.batch_num ASC`,
-        [pattern]
+            AND pr.po_num IN (${poPlaceholders})
+          GROUP BY pr.batch_num, pr.po_num
+          ORDER BY pr.po_num ASC, pr.batch_num ASC`,
+        params
     );
 
     const results = [];
     for (const r of rows) {
         const issued = Number(r.output_qty) || 0;
         if (issued <= 0) continue;
+        const sourcePo = String(r.source_po_num || '').trim();
         const [usedRows] = await pool.query(
             `SELECT COALESCE(SUM(quantity_used), 0) AS used_qty
                FROM role_batch_usage
               WHERE po_num = ?
-                AND input_batch_number = ?`,
-            [po, r.batch_number]
+                AND input_batch_number = ?
+                AND (source_po_num = ? OR (source_po_num IS NULL AND ? IS NULL))`,
+            [po, r.batch_number, sourcePo || null, sourcePo || null]
         );
         const used = Number(usedRows[0]?.used_qty) || 0;
         results.push({
-            issue_id: r.batch_number,
+            issue_id: makeProcessBatchIssueId(sourcePo, r.batch_number),
             batch_number: r.batch_number,
             item_code: r.item_code,
             issued_qty: issued,
@@ -1788,7 +1871,7 @@ async function getPreviousProcessOutputBatches(poNum, prevTag, fgItemCode) {
             remaining_qty: Math.max(0, issued - used),
             input_type: 'process_batch',
             source_batch: r.batch_number,
-            source_po_num: r.source_po_num,
+            source_po_num: sourcePo,
             issued_at: r.produced_at,
             producer_operator: r.producer_operator || null,
             producer_machine: r.producer_machine || null
@@ -1797,32 +1880,40 @@ async function getPreviousProcessOutputBatches(poNum, prevTag, fgItemCode) {
     return results;
 }
 
-async function mergeProcessInputSources(poNum, prevTag, fgItemCode) {
+async function mergeProcessInputSources(poNum, prevTag, fgItemCode, sourcePoNums = null) {
     const po = String(poNum || '').trim();
     const issuedRows = await getIssuedRolesWithRemaining(po);
-    const prevOutputs = await getPreviousProcessOutputBatches(po, prevTag, fgItemCode);
-    const byBatch = new Map();
+    const prevOutputs = await getPreviousProcessOutputBatches(po, prevTag, fgItemCode, sourcePoNums);
+    const byKey = new Map();
 
     for (const r of issuedRows) {
-        const isProcess = String(r.batch_number || '').includes(`-${prevTag}-`)
+        const sourcePo = r.source_po_num || null;
+        const key = sourcePo ? makeProcessBatchIssueId(sourcePo, r.batch_number) : String(r.batch_number);
+        const isProcess = r.input_type === 'process_batch'
+            || Boolean(sourcePo)
+            || String(r.batch_number || '').includes(`-${prevTag}-`)
             || !String(r.batch_number || '').toUpperCase().startsWith('PMI');
-        byBatch.set(r.batch_number, {
+        byKey.set(key, {
             ...r,
+            issue_id: isProcess && sourcePo
+                ? makeProcessBatchIssueId(sourcePo, r.batch_number)
+                : r.issue_id,
             input_type: isProcess ? 'process_batch' : 'raw_roll',
             source_batch: r.batch_number,
-            source_po_num: null
+            source_po_num: sourcePo
         });
     }
 
     for (const r of prevOutputs) {
-        const existing = byBatch.get(r.batch_number);
+        const key = makeProcessBatchIssueId(r.source_po_num, r.batch_number);
+        const existing = byKey.get(key);
         if (!existing) {
-            byBatch.set(r.batch_number, r);
+            byKey.set(key, r);
             continue;
         }
         const issuedQty = Math.max(Number(existing.issued_qty) || 0, Number(r.issued_qty) || 0);
         const usedQty = Math.max(Number(existing.used_qty) || 0, Number(r.used_qty) || 0);
-        byBatch.set(r.batch_number, {
+        byKey.set(key, {
             ...existing,
             issued_qty: issuedQty,
             used_qty: usedQty,
@@ -1833,19 +1924,22 @@ async function mergeProcessInputSources(poNum, prevTag, fgItemCode) {
         });
     }
 
-    return Array.from(byBatch.values()).sort((a, b) => {
+    return Array.from(byKey.values()).sort((a, b) => {
         const ta = a.issued_at ? new Date(a.issued_at).getTime() : 0;
         const tb = b.issued_at ? new Date(b.issued_at).getTime() : 0;
         if (ta !== tb) return ta - tb;
+        const pa = String(a.source_po_num || '');
+        const pb = String(b.source_po_num || '');
+        if (pa !== pb) return pa.localeCompare(pb);
         return String(a.batch_number).localeCompare(String(b.batch_number));
     });
 }
 
 /**
  * Inputs available for report completion: raw rolls (EMB) or previous-process output
- * batches issued/auto-issued to this PO (754 ← 753 EMB-001, EMB-002, …).
+ * batches from the linked source PO(s) in the job chain (754 ← 753 EMB-001, EMB-002, …).
  */
-async function getProcessInputsWithRemaining(poNum, currentProcessTag, fgItemCode) {
+async function getProcessInputsWithRemaining(poNum, currentProcessTag, fgItemCode, sourcePoNums = null) {
     const po = String(poNum || '').trim();
     const tag = String(currentProcessTag || 'EMB').toUpperCase();
     const prevTag = getPreviousUnit1ProcessTag(tag);
@@ -1859,7 +1953,7 @@ async function getProcessInputsWithRemaining(poNum, currentProcessTag, fgItemCod
         }));
     }
 
-    return mergeProcessInputSources(po, prevTag, fgItemCode);
+    return mergeProcessInputSources(po, prevTag, fgItemCode, sourcePoNums);
 }
 
 module.exports = {
@@ -1877,7 +1971,13 @@ module.exports = {
     getPreviousProcessOutputBatches,
     mergeProcessInputSources,
     buildPrevProcessBatchPattern,
+    derivePrevProcessInputItemCode,
+    makeProcessBatchIssueId,
     getPreviousUnit1ProcessTag,
+    getUnit1ProcessChainIndex,
+    isTerminalUnit1Process,
+    isDownstreamUnit1Process,
+    UNIT1_PROCESS_CHAIN,
     recordRoleBatchUsages,
     backfillRoleBatchUsageOperators,
     resolveCompletionOperatorMeta,

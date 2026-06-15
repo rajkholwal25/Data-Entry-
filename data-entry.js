@@ -902,27 +902,29 @@ let finishInputRoles = [];
 let finishSelectedInputs = [];
 let _processLabelSubmitCallback = null;
 
-/** Client-side safety: one entry per batch_number with merged used/remaining. */
+/** Client-side safety: one entry per batch_number + source PO with merged used/remaining. */
 function dedupeSummaryIssuedRoles(roles) {
     if (!Array.isArray(roles) || roles.length === 0) return [];
     const byBatch = new Map();
     for (const r of roles) {
         const batch = String(r.batch_number || '').trim();
         if (!batch) continue;
+        const sourcePo = String(r.source_po_num || '').trim();
+        const key = sourcePo ? `${sourcePo}:${batch}` : batch;
         const issued = Number(r.issued_qty) || 0;
         const used = Number(r.used_qty) || 0;
         const remaining = Number(r.remaining_qty);
         const remainingQty = Number.isFinite(remaining) ? remaining : Math.max(0, issued - used);
-        const prev = byBatch.get(batch);
+        const prev = byBatch.get(key);
         if (!prev) {
-            byBatch.set(batch, { ...r, issued_qty: issued, used_qty: used, remaining_qty: remainingQty });
+            byBatch.set(key, { ...r, issued_qty: issued, used_qty: used, remaining_qty: remainingQty });
             continue;
         }
         const mergedIssued = Math.max(prev.issued_qty, issued);
         const mergedUsed = Math.max(prev.used_qty, used);
-        byBatch.set(batch, {
+        byBatch.set(key, {
             ...prev,
-            issue_id: Math.min(prev.issue_id, r.issue_id),
+            issue_id: prev.issue_id || r.issue_id,
             issued_qty: mergedIssued,
             used_qty: mergedUsed,
             remaining_qty: Math.max(0, mergedIssued - mergedUsed)
@@ -973,8 +975,10 @@ function populateFinishInputDropdown() {
         if (selectedKeys.has(String(r.issue_id))) continue;
         const opt = document.createElement('option');
         opt.value = String(r.issue_id);
-        opt.textContent = `${r.batch_number} — avail ${formatIssueKgsDisplay(r.remaining_qty)} KGS`;
+        const poHint = r.source_po_num ? ` · PO ${r.source_po_num}` : '';
+        opt.textContent = `${r.batch_number}${poHint} — avail ${formatIssueKgsDisplay(r.remaining_qty)} KGS`;
         opt.dataset.batch = r.batch_number;
+        opt.dataset.sourcePo = r.source_po_num || '';
         opt.dataset.remaining = String(r.remaining_qty);
         opt.dataset.item = r.item_code || '';
         opt.dataset.inputType = r.input_type || 'raw_roll';
@@ -1010,7 +1014,7 @@ function renderFinishSelectedInputs() {
         row.className = 'role-selected-row';
         row.dataset.issueId = String(r.issue_id);
         row.innerHTML = `
-            <span class="role-batch-label">${r.batch_number}</span>
+            <span class="role-batch-label">${r.batch_number}${r.source_po_num ? ` <span class="role-po-hint">(PO ${r.source_po_num})</span>` : ''}</span>
             <span class="role-avail">Avail: ${formatIssueKgsDisplay(r.remaining_qty)} KGS</span>
             <span class="role-used-label">Used</span>
             <input type="number" class="finish-role-qty-input" min="0" max="${r.remaining_qty}" step="any"
@@ -1063,6 +1067,7 @@ function addFinishInputFromSelect() {
         batch_number: role.batch_number,
         item_code: role.item_code,
         input_type: role.input_type || 'raw_roll',
+        source_po_num: role.source_po_num || null,
         remaining_qty: role.remaining_qty,
         quantity_used: 0
     });
@@ -1091,6 +1096,7 @@ function collectFinishInputUsages() {
             batch_number: r.batch_number,
             item_code: r.item_code,
             input_type: r.input_type || 'raw_roll',
+            source_po_num: r.source_po_num || null,
             quantity_used: Number(r.quantity_used) || 0
         }));
 }
@@ -3828,6 +3834,9 @@ async function showNonBatchMaterialIssueDialog(material, absoluteEntry, jobPlann
                 chosenWarehouse = warehouseCandidates[0] || '';
             }
             const planned = Number(material?.plannedQuantity ?? jobPlannedQty ?? 0) || 0;
+            const materialAlreadyIssued = Number(material?.issuedQuantity || 0);
+            const materialRemaining = material.remainingQuantity ??
+                Math.max(0, planned - materialAlreadyIssued);
 
             modal.innerHTML = `
                 <div style="background: linear-gradient(135deg, #0f766e 0%, #0b4f48 100%); padding: 16px 20px; color: white;">
@@ -3934,6 +3943,16 @@ async function showNonBatchMaterialIssueDialog(material, absoluteEntry, jobPlann
             await checkAvailabilitySmart();
 
             cancelBtn.addEventListener('click', () => {
+                if (materialAlreadyIssued > 0 && materialRemaining > 0) {
+                    try { document.body.removeChild(overlay); } catch {}
+                    resolve({
+                        success: true,
+                        partial: true,
+                        issuedQuantity: materialAlreadyIssued,
+                        message: `Continuing with ${materialAlreadyIssued} KGS already issued`
+                    });
+                    return;
+                }
                 try { document.body.removeChild(overlay); } catch {}
                 resolve({ success: false, message: 'Material issue cancelled by user' });
             });
@@ -4286,7 +4305,7 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
 
         function updatePartialContinueOption() {
             if (!partialBtn) return;
-            if (materialAlreadyIssued > 0 && allBatches.length === 0 && materialRemaining > 0) {
+            if (materialAlreadyIssued > 0 && materialRemaining > 0) {
                 partialBtn.style.display = 'inline-block';
                 partialBtn.textContent = `Continue with ${materialAlreadyIssued} KGS issued`;
             } else {
@@ -4867,8 +4886,18 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
             updateTotalsOnly();
         });
         
-        // Cancel button
+        // Cancel — if material already issued (partial), continue Running without issuing more
         cancelBtn.addEventListener('click', () => {
+            if (materialAlreadyIssued > 0 && materialRemaining > 0 && !materialIssued) {
+                document.body.removeChild(overlay);
+                resolve({
+                    success: true,
+                    partial: true,
+                    issuedQuantity: materialAlreadyIssued,
+                    message: `Continuing with ${materialAlreadyIssued} KGS already issued`
+                });
+                return;
+            }
             document.body.removeChild(overlay);
             resolve({ success: false, message: 'Material issue cancelled by user' });
         });
@@ -4876,9 +4905,9 @@ async function showRMCBatchIssueDialog(material, absoluteEntry, jobPlannedQty, d
         if (partialBtn) {
             partialBtn.addEventListener('click', () => {
                 if (!confirm(
-                    `${materialAlreadyIssued} KGS is already issued to this job.\n\n` +
-                    `No additional stock was found in the warehouse.\n\n` +
-                    `Continue to Running with partial material (${materialAlreadyIssued} KGS)?`
+                    `${materialAlreadyIssued} KGS is already issued to this job` +
+                    (materialRemaining > 0 ? ` (${materialRemaining} KGS still pending on PO).` : '.') +
+                    `\n\nContinue to Running without issuing more now?`
                 )) {
                     return;
                 }
@@ -6125,16 +6154,23 @@ function handleStateChange(state) {
                     );
                 }
                 if (!result || result.success !== true) return;
-                if (result.partial) hadPartialMaterialContinue = true;
-                if (result.issuedQuantity > 0) {
-                    applyOptimisticMaterialIssued(selectedJob, result.issuedQuantity);
-                } else if (result.partial && alreadyIssued > 0) {
-                    selectedJob.materialIssuedQuantity = Math.max(
+                if (result.partial) {
+                    hadPartialMaterialContinue = true;
+                    const keepQty = Math.max(
                         Number(selectedJob.materialIssuedQuantity) || 0,
-                        alreadyIssued
+                        alreadyIssued,
+                        Number(result.issuedQuantity) || 0
                     );
-                    selectedJob.issuedQuantity = selectedJob.materialIssuedQuantity;
-                    showJobDetails(selectedJob);
+                    if (keepQty > 0) {
+                        selectedJob.materialIssuedQuantity = keepQty;
+                        selectedJob.issuedQuantity = keepQty;
+                        showJobDetails(selectedJob);
+                    }
+                } else {
+                    const newIssued = Number(result.issuedQuantity) || Number(result.quantity) || 0;
+                    if (newIssued > 0) {
+                        applyOptimisticMaterialIssued(selectedJob, newIssued);
+                    }
                 }
             }
 

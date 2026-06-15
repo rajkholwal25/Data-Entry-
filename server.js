@@ -54,7 +54,11 @@ const {
     getGenealogyByOutputBatch,
     getOutputBatchOwnerPO,
     outputBatchBelongsToPO,
-    getPOTraceabilitySummary
+    getPOTraceabilitySummary,
+    derivePrevProcessInputItemCode,
+    getPreviousUnit1ProcessTag,
+    isTerminalUnit1Process,
+    isDownstreamUnit1Process
 } = require('./db-config');
 
 // Live tracking (operator shift sessions + live machine status/state)
@@ -3178,7 +3182,8 @@ async function processJumbledJobAutoIssue(jobData, sapResult, uJobEnt, batchNum)
         const nextPO = await findNextProcessByItemRequired(
             uJobEnt,
             itemCode,
-            jobData.absolute_entry
+            jobData.absolute_entry,
+            uPCode
         );
 
         if (!nextPO) {
@@ -3274,12 +3279,13 @@ function dedupeProductionOrdersByHighestSeries(productionOrders) {
  * @param {number} currentPOAbsEntry - AbsoluteEntry of current PO (to exclude from search)
  * @returns {Object} Next production order with line details or null
  */
-async function findNextProcessByItemRequired(jobEnt, finishedItemCode, currentPOAbsEntry) {
+async function findNextProcessByItemRequired(jobEnt, finishedItemCode, currentPOAbsEntry, sourceUPCode = null) {
     try {
         console.log(`\n🔍 ========== DYNAMIC AUTO-ISSUE SEARCH ==========`);
         console.log(`   U_JobEnt: ${jobEnt}`);
         console.log(`   Finished Item: ${finishedItemCode}`);
         console.log(`   Current PO AbsEntry: ${currentPOAbsEntry}`);
+        console.log(`   Source U_PCode: ${sourceUPCode || '(unknown)'}`);
 
         if (!jobEnt) {
             console.log(`   ❌ No U_JobEnt provided - cannot search for next process`);
@@ -3290,6 +3296,14 @@ async function findNextProcessByItemRequired(jobEnt, finishedItemCode, currentPO
             console.log(`   ❌ No finished item code provided - cannot search for next process`);
             return null;
         }
+
+        if (isTerminalUnit1Process(sourceUPCode, finishedItemCode)) {
+            console.log(`   ℹ️ Terminal process (FG / end of chain) — no auto-issue to next PO`);
+            console.log(`=================================================\n`);
+            return null;
+        }
+
+        const sourceProcessTag = getUnit1ProcessBatchTag(sourceUPCode, null, null, finishedItemCode);
 
         // Query SAP for all production orders with same U_JobEnt (excluding current PO and non-actionable POs).
         // Prefer highest Series per DocumentNumber when duplicates exist.
@@ -3320,6 +3334,14 @@ async function findNextProcessByItemRequired(jobEnt, finishedItemCode, currentPO
 
             // Safety: skip cancelled/closed even if they slipped through (or SAP returns unexpected values).
             if (po.ProductionOrderStatus === 'boposCancelled' || po.ProductionOrderStatus === 'boposClosed') {
+                continue;
+            }
+
+            const nextProcessTag = getUnit1ProcessBatchTag(po.U_PCode, null, null, po.ItemNo);
+            if (!isDownstreamUnit1Process(nextProcessTag, sourceProcessTag)) {
+                console.log(
+                    `   Skipping PO ${po.DocumentNumber}: ${nextProcessTag || po.U_PCode} is not downstream of ${sourceProcessTag || sourceUPCode} (fresh/unrelated job)`
+                );
                 continue;
             }
 
@@ -3385,6 +3407,81 @@ async function findNextProcessByItemRequired(jobEnt, finishedItemCode, currentPO
         }
         return null;
     }
+}
+
+/**
+ * PO(s) in the same U_JobEnt that produced a given intermediate item (e.g. …-EMB for MET step).
+ */
+async function findSourceProcessPOsForInput(jobEnt, inputItemCode, excludeAbsEntry = null) {
+    const job = String(jobEnt || '').trim();
+    const item = String(inputItemCode || '').trim().toUpperCase();
+    if (!job || !item) return [];
+
+    try {
+        const endpoint = `/ProductionOrders?$select=AbsoluteEntry,DocumentNumber,Series,ItemNo,U_PCode,U_JobEnt,ProductionOrderStatus&$filter=U_JobEnt eq '${job}' and ProductionOrderStatus ne 'boposCancelled'`;
+        const sapData = await sapGetRequest(endpoint);
+        const relatedRows = dedupeProductionOrdersByHighestSeries(sapData.value || []);
+        const pos = [];
+        for (const po of relatedRows) {
+            if (excludeAbsEntry != null && po.AbsoluteEntry === excludeAbsEntry) continue;
+            const poItem = String(po.ItemNo || '').trim().toUpperCase();
+            if (poItem === item) {
+                pos.push(String(po.DocumentNumber).trim());
+            }
+        }
+        return [...new Set(pos)];
+    } catch (error) {
+        console.warn('findSourceProcessPOsForInput failed:', error.message);
+        return [];
+    }
+}
+
+/**
+ * Resolve which source PO(s) feed the previous-process inputs for this PO.
+ */
+async function resolveSourcePOsForProcessInputs(poNum, processTag, fgItemCode) {
+    const po = String(poNum || '').trim();
+    const tag = String(processTag || 'EMB').toUpperCase();
+    const prevTag = getPreviousUnit1ProcessTag(tag);
+    if (!po || !prevTag) return [];
+
+    let uJobEnt = null;
+    let absoluteEntry = null;
+    let resolvedFg = String(fgItemCode || '').trim().toUpperCase();
+    try {
+        const poResp = await sapGetRequest(
+            `/ProductionOrders?$filter=DocumentNumber eq ${po}&$select=AbsoluteEntry,DocumentNumber,ItemNo,U_JobEnt,ProductionOrderLines,U_PCode&$top=1`
+        );
+        const row = dedupeProductionOrdersByHighestSeries(poResp?.value || [])[0];
+        if (row) {
+            uJobEnt = row.U_JobEnt;
+            absoluteEntry = row.AbsoluteEntry;
+            if (!resolvedFg) resolvedFg = String(row.ItemNo || '').trim().toUpperCase();
+        }
+    } catch (error) {
+        console.warn(`resolveSourcePOsForProcessInputs SAP lookup failed for PO ${po}:`, error.message);
+    }
+
+    const derivedInput = derivePrevProcessInputItemCode(resolvedFg, prevTag);
+    let inputItemCode = derivedInput;
+    if (uJobEnt && absoluteEntry) {
+        try {
+            const poResp = await sapGetRequest(
+                `/ProductionOrders(${absoluteEntry})?$select=ProductionOrderLines`
+            );
+            const lines = poResp?.ProductionOrderLines || [];
+            const match = lines.find((line) => {
+                const code = String(line.ItemNo || line.ItemCode || '').trim().toUpperCase();
+                return code && code.endsWith(`-${prevTag}`) && (!derivedInput || code === derivedInput);
+            });
+            if (match) {
+                inputItemCode = String(match.ItemNo || match.ItemCode || '').trim().toUpperCase();
+            }
+        } catch (_) { /* use derived input */ }
+    }
+
+    if (!uJobEnt || !inputItemCode) return [];
+    return findSourceProcessPOsForInput(uJobEnt, inputItemCode, absoluteEntry);
 }
 
 /**
@@ -4086,7 +4183,8 @@ async function issueToNextProcessFIFO(params) {
             warehouse: warehouseCode,
             allocations: [{ batchNumber, quantity: quantityToIssue }],
             sapDocEntry: result?.DocEntry,
-            remarks: remarks || `Auto-issue to PO ${nextPODocNumber}`
+            remarks: remarks || `Auto-issue to PO ${nextPODocNumber}`,
+            sourcePoNum: null
         });
 
         return {
@@ -4164,7 +4262,8 @@ async function reconcileAutoIssueGap(params) {
         const nextPO = await findNextProcessByItemRequired(
             uJobEnt,
             finishedItemCode,
-            sourceAbsoluteEntry
+            sourceAbsoluteEntry,
+            uPCode
         );
         if (!nextPO?.targetLine) {
             return { success: false, skipped: true, error: 'No next process PO found requiring this item' };
@@ -4236,7 +4335,8 @@ async function reconcileAutoIssueGap(params) {
             warehouse: warehouseCode,
             allocations,
             sapDocEntry: result?.DocEntry,
-            remarks: remarks || `Auto-issue reconcile from PO ${sourceDocNumber || sourcePO.DocumentNumber}`
+            remarks: remarks || `Auto-issue reconcile from PO ${sourceDocNumber || sourcePO.DocumentNumber}`,
+            sourcePoNum: sourceDocNumber || sourcePO.DocumentNumber
         });
 
         return {
@@ -5480,10 +5580,25 @@ async function recordAutoIssueAllocationsToPO({
     warehouse,
     allocations,
     sapDocEntry,
-    remarks
+    remarks,
+    sourcePoNum
 }) {
     if (!poNum || !Array.isArray(allocations) || allocations.length === 0) return 0;
     try {
+        const enriched = [];
+        for (const a of allocations) {
+            const batchNumber = a.batchNumber || a.batch_number || a.batch;
+            let sourcePo = sourcePoNum != null ? String(sourcePoNum).trim() : null;
+            if (!sourcePo && batchNumber) {
+                const owner = await getOutputBatchOwnerPO(String(batchNumber).trim());
+                sourcePo = owner?.poNum || null;
+            }
+            enriched.push({
+                ...a,
+                batch_number: batchNumber,
+                source_po_num: sourcePo
+            });
+        }
         return await recordMaterialIssues(
             {
                 po_num: String(poNum),
@@ -5492,9 +5607,10 @@ async function recordAutoIssueAllocationsToPO({
                 item_code: itemCode || null,
                 warehouse: warehouse || null,
                 sap_doc_entry: sapDocEntry != null ? String(sapDocEntry) : null,
-                remarks: remarks || 'Auto-issue to next process'
+                remarks: remarks || 'Auto-issue to next process',
+                source_po_num: sourcePoNum != null ? String(sourcePoNum).trim() : null
             },
-            allocations
+            enriched
         );
     } catch (e) {
         console.warn('⚠️ recordAutoIssueAllocationsToPO failed (non-blocking):', e.message);
@@ -5712,6 +5828,48 @@ app.post('/api/job-complete', async (req, res) => {
                 sapPosted: false,
                 sapError: null
             });
+        }
+
+        if (Array.isArray(jobData.role_usages) && jobData.role_usages.length > 0 && jobData.po_num) {
+            const fg = fgForBatch || jobData.fg_num || jobData.item_no || '';
+            const processTag = jobData._batch_process_tag || getUnit1ProcessBatchTag(
+                getJobDataUPCode(jobData),
+                jobData.process_name,
+                jobData.machine_name,
+                fg
+            );
+            const allowedSourcePos = await resolveSourcePOsForProcessInputs(
+                jobData.po_num,
+                processTag,
+                fg
+            );
+            const allowedSet = new Set(allowedSourcePos.map(String));
+            for (const u of jobData.role_usages) {
+                const batch = String(u.batch_number || u.batchNumber || '').trim();
+                const inputType = String(u.input_type || u.inputType || 'raw_roll').trim();
+                if (!batch || inputType !== 'process_batch') continue;
+                let sourcePo = String(u.source_po_num || u.sourcePoNum || '').trim();
+                if (!sourcePo) {
+                    const owner = await getOutputBatchOwnerPO(batch);
+                    sourcePo = owner?.poNum || '';
+                    if (sourcePo) u.source_po_num = sourcePo;
+                }
+                if (allowedSet.size > 0 && sourcePo && !allowedSet.has(sourcePo)) {
+                    return res.status(400).json({
+                        success: false,
+                        error: `Batch ${batch} is from PO ${sourcePo}, not linked to PO ${jobData.po_num}. Expected source PO(s): ${allowedSourcePos.join(', ')}`
+                    });
+                }
+                if (sourcePo) {
+                    const owner = await getOutputBatchOwnerPO(batch, sourcePo);
+                    if (!owner?.poNum) {
+                        return res.status(400).json({
+                            success: false,
+                            error: `Batch ${batch} was not produced on PO ${sourcePo}`
+                        });
+                    }
+                }
+            }
         }
 
         const result = await insertJobActivities(jobData, activities);
@@ -5974,11 +6132,20 @@ app.post('/api/job-complete', async (req, res) => {
                     console.log(`   Current PO: ${jobData.po_num} (AbsEntry: ${jobData.absolute_entry})`);
                     console.log(`   Process: ${uPCode}`);
 
+                    if (isTerminalUnit1Process(uPCode, finishedItemCode)) {
+                        console.log(`   ℹ️ Terminal process (FG) — skipping auto-issue`);
+                        nextProcessResult = {
+                            success: false,
+                            skipped: true,
+                            error: 'Terminal FG process — no auto-issue'
+                        };
+                    } else {
                     // Find next process PO where this item is required as input
                     const nextPO = await findNextProcessByItemRequired(
-                        uJobEnt, 
-                        finishedItemCode, 
-                        jobData.absolute_entry
+                        uJobEnt,
+                        finishedItemCode,
+                        jobData.absolute_entry,
+                        uPCode
                     );
 
                     if (nextPO) {
@@ -6033,6 +6200,7 @@ app.post('/api/job-complete', async (req, res) => {
                             error: 'No next process PO found requiring this item',
                             skipped: true
                         };
+                    }
                     }
                 } else {
                     if (!uJobEnt) {
@@ -6865,14 +7033,17 @@ app.get('/api/traceability/by-po/:poNum', async (req, res) => {
 app.get('/api/traceability/batch-owner/:batchNum', async (req, res) => {
     try {
         const batchNum = String(req.params.batchNum || '').trim();
+        const poHint = String(req.query.po || req.query.po_num || '').trim() || null;
         if (!batchNum) {
             return res.status(400).json({ success: false, message: 'Batch number is required' });
         }
-        const owner = await getOutputBatchOwnerPO(batchNum);
+        const owner = await getOutputBatchOwnerPO(batchNum, poHint);
         if (!owner?.poNum) {
             return res.status(404).json({
                 success: false,
-                message: `No output batch found: ${batchNum}`
+                message: poHint
+                    ? `No output batch ${batchNum} found for PO ${poHint}`
+                    : `No output batch found: ${batchNum}`
             });
         }
         return res.json({
@@ -6905,11 +7076,11 @@ app.get('/api/traceability/by-batch/:batchNum', async (req, res) => {
                 message: 'Please enter PO — batch trace requires PO number and batch number together.'
             });
         }
-        const owner = await getOutputBatchOwnerPO(batchNum);
+        const owner = await getOutputBatchOwnerPO(batchNum, poNum);
         if (!owner?.poNum) {
             return res.status(404).json({
                 success: false,
-                message: `No output batch found: ${batchNum}`
+                message: `No output batch found: ${batchNum} for PO ${poNum}`
             });
         }
         if (owner.poNum !== poNum) {
@@ -8748,8 +8919,9 @@ app.get('/api/po/:poNum/process-inputs', async (req, res) => {
         const resolvedTag = processTag.length <= 4
             ? processTag
             : getUnit1ProcessBatchTag(processTag, null, null, fgItemCode);
-        const roles = await getProcessInputsWithRemaining(poNum, resolvedTag, fgItemCode);
-        res.json({ success: true, poNum, processTag: resolvedTag, roles });
+        const sourcePoNums = await resolveSourcePOsForProcessInputs(poNum, resolvedTag, fgItemCode);
+        const roles = await getProcessInputsWithRemaining(poNum, resolvedTag, fgItemCode, sourcePoNums);
+        res.json({ success: true, poNum, processTag: resolvedTag, sourcePoNums, roles });
     } catch (error) {
         console.error('❌ /api/po/:poNum/process-inputs:', error.message);
         res.status(500).json({ error: 'Failed to load process inputs', message: error.message });
