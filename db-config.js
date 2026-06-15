@@ -2060,7 +2060,7 @@ async function listOutputBatchesForPO(poNum) {
            FROM production_records
           WHERE po_num = ?
           GROUP BY batch_num
-          ORDER BY MAX(job_end_time) DESC NULLS LAST`,
+          ORDER BY batch_num ASC`,
         [po]
     );
     return rows.map((r) => ({

@@ -19,6 +19,9 @@
         <!-- Header Section -->
         <header class="header">
             <div class="header-top-actions">
+                <button type="button" id="btn-open-labels" class="btn-trace btn-labels" title="Process output labels">
+                    🏷️ Process Labels
+                </button>
                 <button type="button" id="btn-open-trace" class="btn-trace" title="Material traceability">
                     🧬 Trace
                 </button>
@@ -42,7 +45,6 @@
             <div class="trace-mode-tabs">
                 <button type="button" class="trace-mode-tab active" data-mode="po">Search by PO</button>
                 <button type="button" class="trace-mode-tab" data-mode="batch">Search by Batch Number</button>
-                <button type="button" class="trace-mode-tab" data-mode="label">Process Label</button>
             </div>
 
             <div class="trace-search-panel active" id="trace-panel-po">
@@ -56,13 +58,7 @@
                 <button type="button" class="trace-btn-primary" id="trace-search-batch-btn">Search Batch</button>
             </div>
 
-            <div class="trace-search-panel trace-search-panel-batch" id="trace-panel-label">
-                <input id="trace-label-po-input" type="text" inputmode="numeric" placeholder="PO Number (required)" aria-label="PO number for label" />
-                <input id="trace-label-batch-input" type="text" placeholder="Output batch (optional — latest if blank)" aria-label="Output batch for label" />
-                <button type="button" class="trace-btn-primary" id="trace-search-label-btn">Generate Label</button>
-            </div>
             <p class="trace-batch-hint" id="trace-batch-hint">Batch trace: enter output batch — PO auto-fills from the job that produced it (e.g. SLT-002 → PO 755, not 753).</p>
-            <p class="trace-batch-hint" id="trace-label-hint" style="display:none">Process label: PO + output batch (batch optional = latest saved). Uses data saved at report completion only — no preview-before-submit.</p>
 
             <div class="trace-status" id="trace-status"></div>
 
@@ -79,19 +75,43 @@
                 </div>
             </div>
 
-            <div class="trace-body" id="trace-body">
-                <div class="trace-main" id="trace-results"></div>
-                <aside class="trace-label-side" id="trace-label-side" aria-label="Process label preview">
-                    <div class="trace-label-side-head">🏷️ Process Label</div>
-                    <div id="trace-label-preview-host" class="trace-label-preview-host">
-                        <p class="trace-label-placeholder">Enter PO and click Generate Label</p>
+            <div id="trace-results"></div>
+        </section>
+
+        <!-- Process Labels (toggle from header — like Trace) -->
+        <section id="process-labels-view" class="traceability-view hidden" aria-label="Process labels">
+            <div class="traceability-toolbar">
+                <button type="button" id="btn-back-from-labels" class="btn-back-machines">← Back to Machines</button>
+            </div>
+            <h2 class="trace-title">🏷️ Process Labels</h2>
+            <p class="trace-sub">
+                Reprint process output labels from <strong>saved report completion</strong> data.
+                Enter a PO to list every output batch — click a batch to preview and print its label.
+            </p>
+            <div class="labels-search-row">
+                <input id="home-label-po-input" type="text" inputmode="numeric" placeholder="PO Number (e.g. 762)" aria-label="PO for process labels" />
+                <button type="button" class="trace-btn-primary" id="home-label-search-btn">Load</button>
+            </div>
+            <div class="home-label-status" id="home-label-status"></div>
+            <div class="labels-body">
+                <div class="home-label-list-wrap">
+                    <div class="home-label-list-title">Output batches</div>
+                    <div id="home-label-output-list" class="home-label-output-list">
+                        <p class="home-label-placeholder">Enter PO and click Load</p>
                     </div>
-                    <div class="trace-label-actions" id="trace-label-actions"></div>
-                </aside>
+                </div>
+                <div class="home-label-preview-wrap">
+                    <div class="home-label-list-title">Label preview</div>
+                    <div id="home-label-preview-host" class="home-label-preview-host">
+                        <p class="home-label-placeholder">Select an output batch</p>
+                    </div>
+                    <div class="home-label-actions" id="home-label-actions"></div>
+                </div>
             </div>
         </section>
 
-        <!-- Unit 1 - Holographic Machines -->
+        <!-- Home: machines only -->
+        <div id="home-view" class="home-view">
         <div id="unit-1-machines" class="branch-machines" data-branch="unit-1">
             <div class="process-grid">
                 <!-- Embossing -->
@@ -225,13 +245,15 @@
                 </div>
             </div>
         </div>
+        </div>
     </div>
 
     <div id="trace-label-print-container" class="trace-label-print-container" aria-hidden="true"></div>
 
     <script src="process-label-formats.js"></script>
     <script src="index.js"></script>
-    <script src="traceability.js?v=20260615b"></script>
+    <script src="traceability.js?v=20260615d"></script>
+    <script src="process-labels-home.js"></script>
 </body>
 
 </html>

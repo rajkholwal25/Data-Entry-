@@ -5,15 +5,8 @@
     const batchPoInput = document.getElementById('trace-batch-po-input');
     const batchInput = document.getElementById('trace-batch-input');
     const batchHintEl = document.getElementById('trace-batch-hint');
-    const labelHintEl = document.getElementById('trace-label-hint');
-    const labelPoInput = document.getElementById('trace-label-po-input');
-    const labelBatchInput = document.getElementById('trace-label-batch-input');
     const statusEl = document.getElementById('trace-status');
     const resultsEl = document.getElementById('trace-results');
-    const traceBodyEl = document.getElementById('trace-body');
-    const labelSideEl = document.getElementById('trace-label-side');
-    const labelPreviewHost = document.getElementById('trace-label-preview-host');
-    const labelActionsEl = document.getElementById('trace-label-actions');
     const poSummaryEl = document.getElementById('trace-po-summary');
     const cardInputs = document.getElementById('trace-card-inputs');
     const cardOutputs = document.getElementById('trace-card-outputs');
@@ -63,52 +56,18 @@
         return isNaN(dt) ? '—' : dt.toLocaleString();
     }
 
-    let pendingTraceLabelData = null;
-
-    function clearLabelSidePanel() {
-        pendingTraceLabelData = null;
-        if (labelPreviewHost) {
-            labelPreviewHost.innerHTML = '<p class="trace-label-placeholder">Enter PO and click Generate Label</p>';
-        }
-        if (labelActionsEl) labelActionsEl.innerHTML = '';
-    }
-
-    function renderLabelSidePanel(labelData) {
-        if (!labelPreviewHost) return;
-        if (typeof ProcessLabelFormats === 'undefined') {
-            labelPreviewHost.innerHTML = '<p class="trace-label-placeholder">Label library not loaded.</p>';
-            return;
-        }
-        labelPreviewHost.innerHTML =
-            `<div class="trace-label-scale">${ProcessLabelFormats.generateProcessLabelHTML(labelData)}</div>`;
-        if (labelActionsEl) {
-            labelActionsEl.innerHTML = `
-                <button type="button" class="trace-btn-primary" id="trace-label-print-device-btn">Print on this device</button>
-                <button type="button" class="trace-btn-primary" id="trace-label-print-server-btn">Send to label printer</button>`;
-            document.getElementById('trace-label-print-device-btn')?.addEventListener('click', printTraceLabelOnDevice);
-            document.getElementById('trace-label-print-server-btn')?.addEventListener('click', sendTraceLabelToPrinter);
-        }
-    }
-
     function setMode(mode) {
         document.querySelectorAll('.trace-mode-tab').forEach((t) => {
             t.classList.toggle('active', t.dataset.mode === mode);
         });
         document.getElementById('trace-panel-po').classList.toggle('active', mode === 'po');
         document.getElementById('trace-panel-batch').classList.toggle('active', mode === 'batch');
-        const labelPanel = document.getElementById('trace-panel-label');
-        if (labelPanel) labelPanel.classList.toggle('active', mode === 'label');
-        if (traceBodyEl) traceBodyEl.classList.toggle('label-mode', mode === 'label');
         if (batchHintEl) {
             batchHintEl.style.display = mode === 'batch' ? '' : 'none';
-        }
-        if (labelHintEl) {
-            labelHintEl.style.display = mode === 'label' ? '' : 'none';
         }
         poSummaryEl.classList.remove('visible');
         resultsEl.innerHTML = '';
         statusEl.textContent = '';
-        clearLabelSidePanel();
     }
 
     document.querySelectorAll('.trace-mode-tab').forEach((tab) => {
@@ -397,123 +356,15 @@
         }
     }
 
-    function buildLabelDataFromApi(raw, po) {
-        if (typeof ProcessLabelFormats === 'undefined') return raw;
-        return ProcessLabelFormats.buildLabelDataFromFinish({
-            job: {
-                itemNo: raw.itemCode || raw.fgCode,
-                itemCode: raw.itemCode || raw.fgCode,
-                jobName: raw.itemDescription || raw.jobName,
-                uPCode: raw.uPCode || ''
-            },
-            machineInfo: { name: raw.machineName, process: raw.processName },
-            poNumber: raw.poNumber || po,
-            outputBatch: raw.outputBatch || raw.batchNo,
-            actualOutput: raw.actualOutput ?? raw.quantity,
-            roleUsages: raw.roleUsages || [],
-            operator: raw.operator,
-            customerName: raw.customerName,
-            itemDescription: raw.itemDescription,
-            packedOn: raw.packedOn
-        });
-    }
-
-    function printTraceLabelOnDevice() {
-        if (!pendingTraceLabelData || typeof ProcessLabelFormats === 'undefined') return;
-        const container = document.getElementById('trace-label-print-container');
-        if (!container) return;
-        container.innerHTML = ProcessLabelFormats.generateProcessLabelHTML(pendingTraceLabelData);
-        container.style.display = 'block';
-        window.print();
-        setTimeout(() => { container.style.display = 'none'; }, 800);
-    }
-
-    async function sendTraceLabelToPrinter() {
-        if (!pendingTraceLabelData) return;
-        const d = pendingTraceLabelData;
-        try {
-            const res = await fetch(`${API_ROOT}/api/process-print-labels`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    labelData: {
-                        poNumber: d.jobNo || d.poNumber,
-                        processName: d.processName,
-                        outputBatch: d.batchNo || d.outputBatch,
-                        actualOutput: d.quantity || d.actualOutput,
-                        rolesUsed: d.rolesUsed,
-                        operator: d.operator,
-                        packedOn: d.packedOn
-                    },
-                    numLabels: 1
-                })
-            });
-            const json = await res.json();
-            if (!json.success) {
-                alert('Label print failed: ' + (json.printResult?.message || json.message || 'Unknown error'));
-            } else {
-                statusEl.textContent = '✅ Label sent to printer.';
-            }
-        } catch (e) {
-            alert('Label print error: ' + (e.message || e));
-        }
-    }
-
-    async function runLabelSearch() {
-        const po = labelPoInput?.value.trim() || '';
-        const batch = labelBatchInput?.value.trim() || '';
-        if (!po) {
-            statusEl.textContent = 'Enter a PO number.';
-            labelPoInput?.focus();
-            return;
-        }
-        statusEl.textContent = 'Loading label from saved data…';
-        resultsEl.innerHTML = '';
-        poSummaryEl.classList.remove('visible');
-        clearLabelSidePanel();
-        try {
-            const qs = batch ? `?batch=${encodeURIComponent(batch)}` : '';
-            const json = await fetchJson(`/api/process-label/by-po/${encodeURIComponent(po)}${qs}`);
-            if (!json.success || !json.labelData) throw new Error(json.message || 'No label data');
-            const labelData = buildLabelDataFromApi(json.labelData, po);
-            pendingTraceLabelData = labelData;
-            const batchId = labelData.batchNo || labelData.outputBatch || '—';
-            const itemCode = labelData.fgCode || json.labelData.itemCode || '—';
-            const processTitle = labelData.slipTitle || labelData.processName || 'Process';
-            statusEl.textContent = `PO ${po} · ${batchId} — label from saved report completion.`;
-
-            resultsEl.innerHTML = `
-                <div class="trace-label-meta">
-                    <div class="trace-label-meta-title">${esc(processTitle)}</div>
-                    <dl class="trace-label-meta-dl">
-                        <dt>PO</dt><dd>${esc(po)}</dd>
-                        <dt>Output Batch</dt><dd class="trace-batch">${esc(batchId)}</dd>
-                        <dt>FG Code</dt><dd>${esc(itemCode)}</dd>
-                        <dt>Quantity</dt><dd>${esc(labelData.quantity || '—')} KGS</dd>
-                        <dt>Operator</dt><dd>${esc(labelData.operator || '—')}</dd>
-                        <dt>Machine</dt><dd>${esc(labelData.machineName || '—')}</dd>
-                        <dt>Packed On</dt><dd>${esc(labelData.packedOn || '—')}</dd>
-                    </dl>
-                </div>`;
-
-            renderLabelSidePanel(labelData);
-        } catch (e) {
-            statusEl.textContent = '❌ ' + (e.message || e);
-        }
-    }
-
     cardInputs.addEventListener('click', () => { poView = 'inputs'; renderPOView(); });
     cardOutputs.addEventListener('click', () => { poView = 'outputs'; renderPOView(); });
 
     document.getElementById('trace-search-po-btn').addEventListener('click', runPOSearch);
     document.getElementById('trace-search-batch-btn').addEventListener('click', runBatchSearch);
-    document.getElementById('trace-search-label-btn')?.addEventListener('click', runLabelSearch);
     poInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runPOSearch(); });
     batchInput?.addEventListener('blur', () => { suggestBatchOwnerPO(); });
     batchPoInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') runBatchSearch(); });
     batchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') runBatchSearch(); });
-    labelPoInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') runLabelSearch(); });
-    labelBatchInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') runLabelSearch(); });
 
     window.traceabilityRunFromParams = function runFromParams() {
         const params = new URLSearchParams(location.search);
@@ -522,11 +373,6 @@
             if (batchPoInput) batchPoInput.value = params.get('po') || '';
             batchInput.value = params.get('batch');
             runBatchSearch();
-        } else if (params.get('label') || params.get('labelPo')) {
-            setMode('label');
-            if (labelPoInput) labelPoInput.value = params.get('labelPo') || params.get('po') || '';
-            if (labelBatchInput) labelBatchInput.value = params.get('batch') || '';
-            runLabelSearch();
         } else if (params.get('po')) {
             setMode('po');
             poInput.value = params.get('po');
