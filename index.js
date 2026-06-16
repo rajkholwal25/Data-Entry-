@@ -32,7 +32,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (traceView) traceView.classList.remove('hidden');
         setHeaderButtonsVisible(false);
         if (pageTitle) pageTitle.textContent = 'Material Traceability';
-        if (pageSubtitle) pageSubtitle.textContent = 'Search by PO or batch number to trace inputs and outputs';
+        if (pageSubtitle) pageSubtitle.textContent = 'Search by production order or batch number to trace inputs and outputs';
         window.scrollTo({ top: 0, behavior: 'smooth' });
         if (typeof window.traceabilityRunFromParams === 'function') {
             window.traceabilityRunFromParams();
@@ -45,7 +45,7 @@ document.addEventListener('DOMContentLoaded', function() {
         if (labelsView) labelsView.classList.remove('hidden');
         setHeaderButtonsVisible(false);
         if (pageTitle) pageTitle.textContent = 'Process Labels';
-        if (pageSubtitle) pageSubtitle.textContent = 'Load a PO — select each output batch to preview and print its label';
+        if (pageSubtitle) pageSubtitle.textContent = 'Load a production order — select each output batch to preview and print its label';
         window.scrollTo({ top: 0, behavior: 'smooth' });
         if (typeof window.processLabelsRunFromParams === 'function') {
             window.processLabelsRunFromParams();

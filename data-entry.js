@@ -55,7 +55,8 @@ const sampleJobs = [
     }
 ];
 
-// Global state — start empty; jobs come from PO search only
+// PO = SAP Production Order (OWOR DocumentNumber). Never Purchase Order.
+// Global state — start empty; jobs come from production-order search only
 let currentJobs = [];
 let selectedJob = null;
 let timerInterval = null;
@@ -101,8 +102,8 @@ let currentMakereadyType = null;
 let pendingShiftEndTime = null;
 
 /**
- * Update PO input state based on whether a job is currently running
- * Disables input and button when a job is in Running or Make Ready state
+ * Update production-order search input based on whether a job is currently running.
+ * Disables input and button when a job is in Running or Make Ready state.
  */
 function updatePOInputState() {
     const poInput = document.getElementById('po-search-input');
@@ -117,7 +118,7 @@ function updatePOInputState() {
             poInput.style.opacity = '0.6';
             poInput.style.cursor = 'not-allowed';
         } else {
-            poInput.placeholder = 'Enter PO Number';
+            poInput.placeholder = 'Production Order #';
             poInput.style.opacity = '1';
             poInput.style.cursor = 'text';
         }
@@ -485,7 +486,7 @@ function performMemoryReset() {
             <div class="no-job-message">
                 <span class="no-job-icon">📋</span>
                 <p>No job loaded</p>
-                <p class="no-job-hint">Search for a PO number to load a job</p>
+                <p class="no-job-hint">Search for a Production Order number to load a job</p>
             </div>
         `;
     }
@@ -542,6 +543,12 @@ async function refreshSAPDataForJob(job) {
             console.log(`✅ SAP data refreshed for job ${job.jobNumber}:`);
             console.log(`   - Issued: ${oldIssued} → ${job.issuedQuantity}`);
             console.log(`   - Completed: ${oldCompleted} → ${job.completedQuantity}`);
+            if (freshData.localCompletedQuantity != null && freshData.sapCompletedQuantity != null &&
+                Math.abs(freshData.localCompletedQuantity - freshData.sapCompletedQuantity) > 1e-6) {
+                console.log(
+                    `   - Already Done source: local=${freshData.localCompletedQuantity}, SAP=${freshData.sapCompletedQuantity}`
+                );
+            }
             
             // Update the selected job reference if it's the same job
             if (selectedJob && selectedJob.jobNumber === job.jobNumber) {
@@ -802,11 +809,54 @@ function isUnit1HolographicJob(job) {
 }
 
 /**
- * Unit 1 embossing only: RM issue is film weight; completion includes chemical
- * coating so done KGS may exceed issued KGS. Other processes keep issued − done cap.
+ * Embossing: role RM issued is usually LESS than planned FG output; already-done (output KGS)
+ * can exceed planned (chemical adds weight). Remaining role RM = Issued − (Done − Chemical).
+ * Next process auto-issue uses output done, not role issued.
+ *
+ * MET / COT / REW / SLT: restrictions removed so issued and done may exceed planned.
  */
 function usesUnit1ProcessInputs(job) {
     return isUnit1HolographicJob(job);
+}
+
+/** MET, COT, REW, SLT only — NOT embossing. */
+function isUnit1FlexibleQtyJob(job) {
+    const tag = getUnit1ProcessTagForJob(job);
+    return tag === 'MET' || tag === 'COT' || tag === 'REW' || tag === 'SLT';
+}
+
+function isSlittingJob(job) {
+    return getUnit1ProcessTagForJob(job) === 'SLT';
+}
+
+/** Slitting: when cumulative done exceeds planned, excess counts as wastage. */
+function computeSlittingOverPlannedWastage(job, batchOutput) {
+    const planned = Number(job?.plannedQuantity) || 0;
+    const alreadyDone = Number(job?.completedQuantity) || 0;
+    const totalDone = alreadyDone + (Number(batchOutput) || 0);
+    return Math.max(0, totalDone - planned);
+}
+
+function resolveSlittingWastage(job, batchOutput) {
+    const overPlanned = computeSlittingOverPlannedWastage(job, batchOutput);
+    if (overPlanned > 0) return overPlanned;
+    return parseFloat(document.getElementById('wasted-sheets')?.value) || 0;
+}
+
+function updateFinishSlittingWastageDisplay() {
+    if (!isSlittingJob(selectedJob)) return;
+    const actual = parseFloat(document.getElementById('sheets-processed')?.value) || 0;
+    const overPlanned = computeSlittingOverPlannedWastage(selectedJob, actual);
+    const wasteEl = document.getElementById('wasted-sheets');
+    if (!wasteEl) return;
+    if (overPlanned > 0) {
+        wasteEl.value = formatIssueKgsDisplay(overPlanned);
+        wasteEl.readOnly = true;
+        wasteEl.removeAttribute('required');
+    } else {
+        wasteEl.readOnly = false;
+        wasteEl.setAttribute('required', 'required');
+    }
 }
 
 function getUnit1ProcessTagForJob(job) {
@@ -834,10 +884,15 @@ function isEmbossingJob(job) {
     return u.includes('EMB');
 }
 
-/** Cumulative chemical used (embossing only) — stored in local DB per PO. */
+/** Cumulative chemical used (embossing only) — from finish reports on this PO. */
 function getEmbossingChemicalUsedQty(job) {
     if (!job || !isEmbossingJob(job)) return 0;
-    return Number(job.embossingChemicalUsedQuantity) || 0;
+    const fromDb = Number(job.embossingChemicalUsedQuantity);
+    if (Number.isFinite(fromDb) && fromDb > 0) return fromDb;
+    const done = Number(job.completedQuantity) || 0;
+    const role = getEmbossingRoleUsedQty(job);
+    if (role != null && done > role + 1e-6) return done - role;
+    return Number.isFinite(fromDb) ? fromDb : 0;
 }
 
 /**
@@ -985,7 +1040,7 @@ function populateFinishInputDropdown() {
         if (selectedKeys.has(String(r.issue_id))) continue;
         const opt = document.createElement('option');
         opt.value = String(r.issue_id);
-        const poHint = r.source_po_num ? ` · PO ${r.source_po_num}` : '';
+        const poHint = r.source_po_num ? ` · Prod. order ${r.source_po_num}` : '';
         opt.textContent = `${r.batch_number}${poHint} — avail ${formatIssueKgsDisplay(r.remaining_qty)} KGS`;
         opt.dataset.batch = r.batch_number;
         opt.dataset.sourcePo = r.source_po_num || '';
@@ -1024,7 +1079,7 @@ function renderFinishSelectedInputs() {
         row.className = 'role-selected-row';
         row.dataset.issueId = String(r.issue_id);
         row.innerHTML = `
-            <span class="role-batch-label">${r.batch_number}${r.source_po_num ? ` <span class="role-po-hint">(PO ${r.source_po_num})</span>` : ''}</span>
+            <span class="role-batch-label">${r.batch_number}${r.source_po_num ? ` <span class="role-po-hint">(Prod. order ${r.source_po_num})</span>` : ''}</span>
             <span class="role-avail">Avail: ${formatIssueKgsDisplay(r.remaining_qty)} KGS</span>
             <span class="role-used-label">Used</span>
             <input type="number" class="finish-role-qty-input" min="0" max="${r.remaining_qty}" step="any"
@@ -1327,7 +1382,7 @@ function applyJobFinishMachineReset(completedJob) {
     if (jobNumberEl) jobNumberEl.textContent = '--';
 
     const jobNameEl = document.getElementById('selected-job-name');
-    if (jobNameEl) jobNameEl.textContent = 'Select a job from "Search PO"';
+    if (jobNameEl) jobNameEl.textContent = 'Select a job from Production Order search';
 
     const itemNoEl = document.getElementById('selected-job-itemno');
     if (itemNoEl) itemNoEl.textContent = '-';
@@ -1436,7 +1491,10 @@ function wireFinishUnit1Listeners() {
     if (_finishUnit1Wired) return;
     const totalEl = document.getElementById('sheets-processed');
     if (totalEl) {
-        totalEl.addEventListener('input', () => updateFinishEmbossingChemicalAuto());
+        totalEl.addEventListener('input', () => {
+            updateFinishEmbossingChemicalAuto();
+            updateFinishSlittingWastageDisplay();
+        });
     }
     document.getElementById('finish-role-add-btn')?.addEventListener('click', addFinishInputFromSelect);
     wireProcessLabelModalListeners();
@@ -1503,7 +1561,7 @@ function getPendingMaterialsForRunning(job) {
         seen.add(key);
         const rem = m.remainingQuantity ??
             Math.max(0, (m.plannedQuantity || 0) - (m.issuedQuantity || 0));
-        if (rem > 1e-6) pending.push(m);
+        if (rem > 1e-6 || isUnit1FlexibleQtyJob(job)) pending.push(m);
     }
     pending.sort((a, b) => (Number(a.lineNumber) || 0) - (Number(b.lineNumber) || 0));
     return pending;
@@ -2451,7 +2509,7 @@ async function handleShiftChangeover() {
     const jobNumberEl = document.getElementById('selected-job-number');
     if (jobNumberEl) jobNumberEl.textContent = '--';
     const jobNameEl = document.getElementById('selected-job-name');
-    if (jobNameEl) jobNameEl.textContent = 'Select a job from "Search PO"';
+    if (jobNameEl) jobNameEl.textContent = 'Select a job from Production Order search';
     const itemNoEl = document.getElementById('selected-job-itemno');
     if (itemNoEl) itemNoEl.textContent = '-';
     const quantityEl = document.getElementById('selected-job-quantity');
@@ -3152,6 +3210,7 @@ function showJobDetails(job) {
     }
 
     const unit1Job = isUnit1HolographicJob(job);
+    const embossingJob = isEmbossingJob(job);
     const issuedQty = getJobIssuedQtyForDisplay(job);
     const completedQty = job.completedQuantity || 0;
 
@@ -3167,6 +3226,11 @@ function showJobDetails(job) {
         jobIssuedEl.textContent = (unit1Job || issuedQty > 0)
             ? issuedQty.toLocaleString()
             : '-';
+        if (embossingJob) {
+            jobIssuedEl.title = 'Role/film RM issued (KGS) — usually less than planned FG output';
+        } else {
+            jobIssuedEl.title = '';
+        }
     }
 
     // Remaining = issued − already done
@@ -3176,12 +3240,17 @@ function showJobDetails(job) {
     if (jobCompletedEl) {
         if (unit1Job || issuedQty > 0) {
             jobCompletedEl.textContent = completedQty.toLocaleString();
+            if (embossingJob) {
+                jobCompletedEl.title = 'Cumulative actual output (KGS) from all finish batches on this PO';
+            } else {
+                jobCompletedEl.title = '';
+            }
         } else {
             jobCompletedEl.textContent = '-';
+            jobCompletedEl.title = '';
         }
     }
     
-    const embossingJob = isEmbossingJob(job);
     const chemicalWrap = document.getElementById('selected-job-chemical-wrap');
     const chemicalEl = document.getElementById('selected-job-chemical');
     if (chemicalWrap) {
@@ -3190,7 +3259,7 @@ function showJobDetails(job) {
     if (embossingJob && chemicalEl) {
         const chemicalUsed = getEmbossingChemicalUsedQty(job);
         chemicalEl.textContent = chemicalUsed.toLocaleString();
-        chemicalEl.title = 'Cumulative chemical (KGS) from local DB — entered on job completion reports';
+        chemicalEl.title = 'Cumulative chemical (KGS) from all finish batches on this production order (this batch: output − role used)';
     }
 
     const jobRemainingEl = document.getElementById('selected-job-remaining');
@@ -3205,7 +3274,11 @@ function showJobDetails(job) {
                     : 'Enter chemical on job completion report — Remaining = Issued − (Done − Chemical)';
             } else {
                 jobRemainingEl.textContent = remainingQty.toLocaleString();
-                jobRemainingEl.title = '';
+                if (isUnit1FlexibleQtyJob(job)) {
+                    jobRemainingEl.title = `Remaining = Issued (${issuedQty}) − Already Done (${completedQty})`;
+                } else {
+                    jobRemainingEl.title = '';
+                }
             }
         } else {
             jobRemainingEl.textContent = '-';
@@ -5646,7 +5719,7 @@ async function displayFetchedJob(jobData) {
             : Math.max(0, issued - doneQty);
         if (!embossingJob && remaining <= 0) {
             alert(
-                `PO ${jobData.jobNumber} is already fully completed this shift.\n\n` +
+                `Production order ${jobData.jobNumber} is already fully completed this shift.\n\n` +
                 `Issued: ${issued} | Done: ${doneQty}\n\n` +
                 `See Shift Summary. Do not re-add unless supervisor approves rework.`
             );
@@ -5656,7 +5729,7 @@ async function displayFetchedJob(jobData) {
             ? `Done: ${doneQty} KGS | Remaining role RM: ${remaining} KGS`
             : `Remaining: ${remaining}`;
         if (!confirm(
-            `PO ${jobData.jobNumber} was already worked this shift.\n\n` +
+            `Production order ${jobData.jobNumber} was already worked this shift.\n\n` +
             `Issued: ${issued} | Done: ${doneQty} | ${remainingLine}\n\n` +
             `Add again to run another batch?`
         )) {
@@ -5678,7 +5751,7 @@ async function displayFetchedJob(jobData) {
         // Fallback duplicate check
         const existingJob = currentJobs.find(job => job.jobNumber === jobData.jobNumber);
         if (existingJob) {
-            if (!confirm(`PO ${jobData.jobNumber} is already in the queue. Add another instance?`)) {
+            if (!confirm(`Production order ${jobData.jobNumber} is already in the queue. Add another instance?`)) {
                 return false;
             }
         }
@@ -6258,8 +6331,10 @@ function handleStateChange(state) {
 
                 const alreadyIssued = Number(mat.issuedQuantity || 0);
                 const manualDialog = needsManualMaterialIssueDialog(selectedJob, mat, pendingMaterials, i);
+                const forceManualOverPlanned = isUnit1FlexibleQtyJob(selectedJob) &&
+                    alreadyIssued >= (Number(mat.plannedQuantity) || 0) - 1e-6;
 
-                if (!manualDialog) {
+                if (!manualDialog && !forceManualOverPlanned) {
                     hideMaterialCheckOverlay();
                     console.log(`📦 Auto-issuing (no popup): ${mat.itemNo} from ${mat.warehouse || 'WH'}`);
                     const autoResult = await tryAutoIssueMaterialLine(selectedJob, mat);
@@ -7366,6 +7441,7 @@ function configureFinishModalFields() {
 
     const unit1Finish = usesUnit1ProcessInputs(selectedJob);
     const embossingFinish = isEmbossingJob(selectedJob);
+    const slittingFinish = isSlittingJob(selectedJob);
     const finishUnit1Fields = document.getElementById('finish-unit1-fields');
     const finishChemGroup = document.getElementById('finish-chemical-group');
     const sheetsProcessedGroup = document.getElementById('sheets-processed-group');
@@ -7384,8 +7460,17 @@ function configureFinishModalFields() {
         if (wastedSheetsGroup) wastedSheetsGroup.style.display = 'block';
         if (sheetsProcessedLabel) sheetsProcessedLabel.textContent = 'Actual Output (KGS) *';
         if (sheetsProcessedHint) sheetsProcessedHint.style.display = 'block';
-        if (wastedLabel) wastedLabel.textContent = embossingFinish ? 'Wastage (KGS)' : 'Wasted Quantity (KGS) *';
-        if (wastedHint) wastedHint.style.display = embossingFinish ? 'block' : 'none';
+        if (wastedLabel) {
+            wastedLabel.textContent = (embossingFinish || slittingFinish) ? 'Wastage (KGS)' : 'Wasted Quantity (KGS) *';
+        }
+        if (wastedHint) {
+            wastedHint.style.display = (embossingFinish || slittingFinish) ? 'block' : 'none';
+            if (wastedHint && slittingFinish) {
+                wastedHint.textContent = 'Enter slit trim wastage. If total done exceeds planned, wastage auto = done − planned';
+            } else if (wastedHint && embossingFinish) {
+                wastedHint.textContent = 'Auto-calculated for embossing';
+            }
+        }
         const prevTag = getPreviousUnit1ProcessTagForJob(selectedJob);
         if (inputsLabel) {
             inputsLabel.textContent = prevTag
@@ -7401,6 +7486,9 @@ function configureFinishModalFields() {
         if (embossingFinish) {
             document.getElementById('wasted-sheets')?.removeAttribute('required');
             document.getElementById('wasted-sheets')?.setAttribute('readonly', 'readonly');
+        } else if (slittingFinish) {
+            document.getElementById('wasted-sheets')?.setAttribute('required', 'required');
+            document.getElementById('wasted-sheets')?.removeAttribute('readonly');
         } else {
             document.getElementById('wasted-sheets')?.setAttribute('required', 'required');
             document.getElementById('wasted-sheets')?.removeAttribute('readonly');
@@ -7603,7 +7691,9 @@ async function handleFinishJob(e) {
         sheetsProcessed = actualOutput;
         wastedSheets = isEmbossingJob(selectedJob)
             ? computeEmbossingWastage(roleUsed, chemicalUsed, actualOutput)
-            : (parseFloat(document.getElementById('wasted-sheets')?.value) || 0);
+            : isSlittingJob(selectedJob)
+                ? resolveSlittingWastage(selectedJob, actualOutput)
+                : (parseFloat(document.getElementById('wasted-sheets')?.value) || 0);
         window._pendingFinishRoleUsages = roleUsages;
         window._pendingFinishRoleUsed = roleUsed;
         window._pendingFinishChemicalUsed = chemicalUsed;
@@ -7744,7 +7834,8 @@ async function handleFinishJob(e) {
     const embossingFinishJob = isEmbossingJob(selectedJob);
     console.log(`📊 Quantity validation: IssuedQty=${issuedQty}, CompletedQty=${completedQty}, RemainingQty=${remainingQty}, FinalSAPQty=${finalSAPQuantity}, embossing=${embossingFinishJob}`);
 
-    if (!embossingFinishJob && machineInfo.name !== 'wity' &&
+    const flexibleQtyFinishJob = isUnit1FlexibleQtyJob(selectedJob);
+    if (!embossingFinishJob && !flexibleQtyFinishJob && machineInfo.name !== 'wity' &&
         (unit1FinishJob || issuedQty > 0) && finalSAPQuantity > remainingQty) {
         const isDieCutting = shouldApplyBaseQuantityDivision() && baseQuantities.length > 0;
         let errorMsg = `❌ Quantity Exceeds Remaining!\n\n`;
@@ -8172,7 +8263,7 @@ async function finalizeCompletedJob(completedJob, makereadySeconds, runningSecon
     } else if (saveResult?.success && saveResult.sapPosted) {
         let successMsg = `${qtyLine}`;
         if (saveResult.autoIssue?.success) {
-            successMsg += `<br>Auto-issued to ${saveResult.autoIssue.targetProcess} PO ${saveResult.autoIssue.targetPO}`;
+            successMsg += `<br>Auto-issued to ${saveResult.autoIssue.targetProcess} production order ${saveResult.autoIssue.targetPO}`;
         }
         showActionToast({
             title: 'Submitted successfully',

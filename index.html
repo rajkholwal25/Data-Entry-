@@ -7,7 +7,7 @@
     <title>Unit 1 - Holographic Data Entry System</title>
     <meta name="description" content="Data entry system for Unit 1 (Holographic) post-press processes">
     <link rel="stylesheet" href="index.css">
-    <link rel="stylesheet" href="label-sap-styles.css?v=20260615g">
+    <link rel="stylesheet" href="label-sap-styles.css?v=20260615r">
 </head>
 
 <body>
@@ -39,26 +39,26 @@
             <h2 class="trace-title">🧬 Material Traceability</h2>
             <p class="trace-sub">
                 Links come from <strong>report completion</strong> (Finish Job → inputs you selected + qty used).
-                PO search lists all inputs/outputs for a job. Batch search needs <strong>PO + batch number</strong> together (batch IDs can repeat across POs).
+                Production Order search lists all inputs/outputs for a job. Batch search needs <strong>production order + batch number</strong> together (batch IDs can repeat across orders).
             </p>
 
             <div class="trace-mode-tabs">
-                <button type="button" class="trace-mode-tab active" data-mode="po">Search by PO</button>
+                <button type="button" class="trace-mode-tab active" data-mode="po">Search by Production Order</button>
                 <button type="button" class="trace-mode-tab" data-mode="batch">Search by Batch Number</button>
             </div>
 
             <div class="trace-search-panel active" id="trace-panel-po">
-                <input id="trace-po-input" type="text" inputmode="numeric" placeholder="PO Number (e.g. 753)" />
-                <button type="button" class="trace-btn-primary" id="trace-search-po-btn">Search PO</button>
+                <input id="trace-po-input" type="text" inputmode="numeric" placeholder="Production Order # (e.g. 753)" aria-label="Production Order number" />
+                <button type="button" class="trace-btn-primary" id="trace-search-po-btn">Search</button>
             </div>
 
             <div class="trace-search-panel trace-search-panel-batch" id="trace-panel-batch">
-                <input id="trace-batch-po-input" type="text" inputmode="numeric" placeholder="PO Number (required)" aria-label="PO number for batch trace" />
+                <input id="trace-batch-po-input" type="text" inputmode="numeric" placeholder="Production Order # (required)" aria-label="Production Order number for batch trace" />
                 <input id="trace-batch-input" type="text" placeholder="Output batch (e.g. PET-45-1001-HF-SLT-002)" aria-label="Output batch number" />
                 <button type="button" class="trace-btn-primary" id="trace-search-batch-btn">Search Batch</button>
             </div>
 
-            <p class="trace-batch-hint" id="trace-batch-hint">Batch trace: enter output batch — PO auto-fills from the job that produced it (e.g. SLT-002 → PO 755, not 753).</p>
+            <p class="trace-batch-hint" id="trace-batch-hint">Batch trace: enter output batch — production order auto-fills from the job that produced it (e.g. SLT-002 → order 755, not 753).</p>
 
             <div class="trace-status" id="trace-status"></div>
 
@@ -71,7 +71,7 @@
                 <div class="trace-summary-card outputs selected" id="trace-card-outputs" data-view="outputs">
                     <div class="trace-summary-label">Total Output Batches</div>
                     <div class="trace-summary-count" id="trace-output-count">0</div>
-                    <div class="trace-summary-hint">Batches produced for this PO</div>
+                    <div class="trace-summary-hint">Batches produced for this production order</div>
                 </div>
             </div>
 
@@ -86,10 +86,10 @@
             <h2 class="trace-title">🏷️ Process Labels</h2>
             <p class="trace-sub">
                 Reprint process output labels from <strong>saved report completion</strong> data.
-                Enter a PO to list every output batch — click a batch to preview and print its label.
+                Enter a production order to list every output batch — click a batch to preview and print its label.
             </p>
             <div class="labels-search-row">
-                <input id="home-label-po-input" type="text" inputmode="numeric" placeholder="PO Number (e.g. 762)" aria-label="PO for process labels" />
+                <input id="home-label-po-input" type="text" inputmode="numeric" placeholder="Production Order # (e.g. 762)" aria-label="Production Order for process labels" />
                 <button type="button" class="trace-btn-primary" id="home-label-search-btn">Load</button>
             </div>
             <div class="home-label-status" id="home-label-status"></div>
@@ -97,7 +97,7 @@
                 <div class="home-label-list-wrap">
                     <div class="home-label-list-title">Output batches</div>
                     <div id="home-label-output-list" class="home-label-output-list">
-                        <p class="home-label-placeholder">Enter PO and click Load</p>
+                        <p class="home-label-placeholder">Enter production order and click Load</p>
                     </div>
                 </div>
                 <div class="home-label-preview-wrap">
@@ -251,10 +251,10 @@
     <div id="trace-label-print-container" class="trace-label-print-container" aria-hidden="true"></div>
 
     <script src="node_modules/qrcode-generator/dist/qrcode.js"></script>
-    <script src="process-label-formats.js?v=20260615g"></script>
+    <script src="process-label-formats.js?v=20260615r"></script>
     <script src="index.js"></script>
-    <script src="traceability.js?v=20260615d"></script>
-    <script src="process-labels-home.js"></script>
+    <script src="traceability.js?v=20260616e"></script>
+    <script src="process-labels-home.js?v=20260616e"></script>
 </body>
 
 </html>

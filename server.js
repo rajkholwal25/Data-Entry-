@@ -27,6 +27,7 @@ const {
     insertJobActivities,
     getActivitiesByBatchNum,
     getBatchesByPO,
+    sumCompletedQtyByPO,
     getEmbossingQuantitiesByPO,
     getJobSummary,
     getShiftSummary,
@@ -3793,6 +3794,12 @@ function isEmbossingProcessCode(uPCode) {
     return u.includes('EMB');
 }
 
+/** Metallisation / coating / rewinding / slitting — issued and done may exceed planned qty. */
+function isUnit1FlexibleQtyProcess(uPCode) {
+    const u = String(uPCode || '').toUpperCase();
+    return u.includes('MET') || u.includes('MTL') || u.includes('COT') || u.includes('REW') || u.includes('SLT');
+}
+
 function sumUnit1MaterialQuantities(lines, headerItemNo) {
     let planned = 0;
     let issued = 0;
@@ -4573,7 +4580,7 @@ app.get('/api/health', async (req, res) => {
     });
 });
 
-// Get Production Order by Document Number
+// Get SAP Production Order (OWOR) by DocumentNumber — "PO" in this app is NOT Purchase Order.
 app.get('/api/production-order/:docNumber', async (req, res) => {
     try {
         const { docNumber } = req.params;
@@ -4806,7 +4813,10 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
                         console.log(`   📦 PMT Material: ${line.ItemNo}, PlannedQty: ${plannedQty}, IssuedQty: ${issuedQty}, NeedsIssue: ${plannedQty > 0 && issuedQty === 0}`);
                     }
                     
-                    // Include while issued qty is below planned (supports partial issue / resume)
+                    // MET/COT/REW: keep line available for over-planned issue; others until fully issued
+                    if (unit1Po && isUnit1FlexibleQtyProcess(productionOrder.U_PCode)) {
+                        return plannedQty > 0;
+                    }
                     return plannedQty > 0 && issuedQty < plannedQty - 1e-6;
                 })
                 .forEach(line => {
@@ -5081,11 +5091,7 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
             issuedQuantity = matQty.issued;
             completedQuantity = headerCompletedQty;
             try {
-                const localBatches = await getBatchesByPO(String(docNumber));
-                localCompletedQuantity = localBatches.reduce(
-                    (sum, b) => sum + (parseInt(b.quantity_processed, 10) || 0),
-                    0
-                );
+                localCompletedQuantity = await sumCompletedQtyByPO(String(docNumber));
                 if (isEmbossingProcessCode(productionOrder.U_PCode)) {
                     const emb = await getEmbossingQuantitiesByPO(String(docNumber));
                     embossingChemicalUsedQuantity = emb.chemicalUsed;
@@ -5101,12 +5107,19 @@ app.get('/api/production-order/:docNumber', async (req, res) => {
                 if (poLocallyReset && localCompletedQuantity === 0) {
                     completedQuantity = 0;
                     console.log(`   🔄 PO ${docNumber} locally reset — Already Done forced to 0 until SAP posts`);
+                } else if (localCompletedQuantity > 0) {
+                    completedQuantity = localCompletedQuantity;
+                    if (headerCompletedQty > localCompletedQuantity + 1e-6) {
+                        console.log(
+                            `   ℹ️ PO ${docNumber}: SAP Already Done (${headerCompletedQty}) > local batches (${localCompletedQuantity}) — using local app total`
+                        );
+                    }
                 } else {
-                    completedQuantity = Math.max(headerCompletedQty, localCompletedQuantity);
+                    completedQuantity = headerCompletedQty;
                 }
             } catch (resetErr) {
                 console.warn(`⚠️ PO reset check failed for ${docNumber}:`, resetErr.message);
-                completedQuantity = Math.max(headerCompletedQty, localCompletedQuantity);
+                completedQuantity = localCompletedQuantity > 0 ? localCompletedQuantity : headerCompletedQty;
             }
         }
 

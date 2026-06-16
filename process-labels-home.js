@@ -134,7 +134,7 @@
 
     function renderOutputList(selectedBatch) {
         if (!outputRows.length) {
-            listEl.innerHTML = '<p class="home-label-empty">No output batches saved for this PO yet.</p>';
+            listEl.innerHTML = '<p class="home-label-empty">No output batches saved for this production order yet.</p>';
             clearPreview();
             return;
         }
@@ -171,7 +171,7 @@
             const labelData = buildLabelDataFromApi(json.labelData, currentPo);
             renderPreview(labelData);
             if (statusEl) {
-                statusEl.textContent = `PO ${currentPo} · ${b} — ${outputRows.length} output batch(es). Click another row to switch label.`;
+                statusEl.textContent = `Production order ${currentPo} · ${b} — ${outputRows.length} output batch(es). Click another row to switch label.`;
             }
         } catch (e) {
             clearPreview();
@@ -182,7 +182,7 @@
     async function loadPoLabels() {
         const po = poInput.value.trim();
         if (!po) {
-            if (statusEl) statusEl.textContent = 'Enter a PO number.';
+            if (statusEl) statusEl.textContent = 'Enter a production order number.';
             poInput.focus();
             return;
         }
@@ -197,12 +197,12 @@
                 (a, b) => batchSeqKey(a.outputBatch) - batchSeqKey(b.outputBatch)
             );
             if (!outputRows.length) {
-                if (statusEl) statusEl.textContent = `PO ${po}: no saved output batches yet.`;
+                if (statusEl) statusEl.textContent = `Production order ${po}: no saved output batches yet.`;
                 renderOutputList('');
                 return;
             }
             if (statusEl) {
-                statusEl.textContent = `PO ${po}: ${outputRows.length} output batch(es). Select one for its label.`;
+                statusEl.textContent = `Production order ${po}: ${outputRows.length} output batch(es). Select one for its label.`;
             }
             const firstBatch = outputRows[0].outputBatch;
             renderOutputList(firstBatch);

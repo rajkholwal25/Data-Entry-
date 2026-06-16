@@ -165,7 +165,7 @@ async function ensureSchema() {
     await pool.query(`
         CREATE VIEW vw_batch_summary AS
         SELECT batch_num,
-               MAX(po_num)               AS po_num,
+               po_num,
                MAX(fg_num)               AS fg_num,
                MAX(job_name)             AS job_name,
                MAX(machine_name)         AS machine_name,
@@ -181,13 +181,14 @@ async function ensureSchema() {
                SUM(activity_time_minutes) AS total_minutes,
                COUNT(*)                  AS activity_count
         FROM production_records
-        GROUP BY batch_num
+        WHERE po_num IS NOT NULL AND TRIM(po_num) <> ''
+        GROUP BY batch_num, po_num
     `);
 
     await pool.query(`
         CREATE VIEW vw_job_summary AS
         SELECT batch_num,
-               MAX(po_num)               AS po_num,
+               po_num,
                MAX(fg_num)               AS fg_num,
                MAX(job_name)             AS job_name,
                MAX(machine_name)         AS machine_name,
@@ -204,7 +205,8 @@ async function ensureSchema() {
                SUM(CASE WHEN activity_name = 'running'   THEN activity_time_minutes ELSE 0 END) AS running_minutes,
                COUNT(*)                  AS activity_count
         FROM production_records
-        GROUP BY batch_num
+        WHERE po_num IS NOT NULL AND TRIM(po_num) <> ''
+        GROUP BY batch_num, po_num
     `);
 
     await pool.query(`
@@ -759,12 +761,55 @@ async function getActivitiesByBatchNum(batchNum) {
     }
 }
 
-// Get all batches for a PO
-async function getBatchesByPO(poNum) {
+/** Sum actual output (KGS) from finish reports for one PO only — one row per output batch. */
+async function sumCompletedQtyByPO(poNum) {
+    const po = String(poNum || '').trim();
+    if (!po) return 0;
     try {
         const [rows] = await pool.query(
-            'SELECT * FROM vw_batch_summary WHERE po_num = ? ORDER BY job_start DESC',
-            [poNum]
+            `SELECT COALESCE(SUM(batch_qty), 0) AS total
+               FROM (
+                   SELECT MAX(quantity_processed) AS batch_qty
+                     FROM production_records
+                    WHERE po_num = ?
+                    GROUP BY batch_num
+               ) per_batch`,
+            [po]
+        );
+        return Number(rows[0]?.total) || 0;
+    } catch (error) {
+        console.error('Error summing completed qty for PO:', error);
+        throw error;
+    }
+}
+
+// Get all finish-report batches for a PO (strict po_num filter — no cross-PO mixing)
+async function getBatchesByPO(poNum) {
+    const po = String(poNum || '').trim();
+    if (!po) return [];
+    try {
+        const [rows] = await pool.query(
+            `SELECT batch_num,
+                    po_num,
+                    MAX(fg_num)                 AS fg_num,
+                    MAX(job_name)               AS job_name,
+                    MAX(machine_name)           AS machine_name,
+                    MAX(operator_name)        AS operator_name,
+                    MAX(shift_type)             AS shift_type,
+                    MIN(job_start_time)         AS job_start,
+                    MAX(job_end_time)           AS job_end,
+                    MAX(planned_qty)            AS planned_qty,
+                    MAX(quantity_processed)     AS quantity_processed,
+                    MAX(role_quantity_used)     AS role_quantity_used,
+                    MAX(chemical_quantity_used) AS chemical_quantity_used,
+                    SUM(sheets_wasted)            AS total_sheets_wasted,
+                    SUM(activity_time_minutes)    AS total_minutes,
+                    COUNT(*)                      AS activity_count
+               FROM production_records
+              WHERE po_num = ?
+              GROUP BY batch_num, po_num
+              ORDER BY job_start DESC NULLS LAST`,
+            [po]
         );
         return rows;
     } catch (error) {
@@ -773,17 +818,26 @@ async function getBatchesByPO(poNum) {
     }
 }
 
-/** Cumulative embossing role/chemical from local batches (role drives RM remaining). */
+/** Cumulative embossing role/chemical from finish reports on this PO only. */
 async function getEmbossingQuantitiesByPO(poNum) {
+    const po = String(poNum || '').trim();
+    if (!po) {
+        return { roleUsed: 0, chemicalUsed: 0, trackedBatches: 0 };
+    }
     try {
         const [rows] = await pool.query(
             `SELECT
-                COALESCE(SUM(role_quantity_used), 0)     AS role_used,
-                COALESCE(SUM(chemical_quantity_used), 0) AS chemical_used,
-                COUNT(*) FILTER (WHERE role_quantity_used IS NOT NULL) AS tracked_batches
-             FROM vw_batch_summary
-             WHERE po_num = ?`,
-            [poNum]
+                COALESCE(SUM(batch_role), 0)     AS role_used,
+                COALESCE(SUM(batch_chem), 0)     AS chemical_used,
+                COUNT(*) FILTER (WHERE batch_role IS NOT NULL) AS tracked_batches
+             FROM (
+                SELECT MAX(role_quantity_used)     AS batch_role,
+                       MAX(chemical_quantity_used) AS batch_chem
+                  FROM production_records
+                 WHERE po_num = ?
+                 GROUP BY batch_num
+             ) per_batch`,
+            [po]
         );
         const row = rows[0] || {};
         return {
@@ -1671,12 +1725,16 @@ async function getPOTraceabilitySummary(poNum, options = {}) {
     }
 
     const [prodRows] = await pool.query(
-        `SELECT batch_num, quantity_processed, fg_num, job_start_time,
-                operator_name, machine_name, process_name
-           FROM (${PR_COMPLETION_SUBQUERY}) pr
-          WHERE batch_num IN (
-              SELECT DISTINCT batch_num FROM production_records WHERE po_num = ?
-          )
+        `SELECT batch_num,
+                MAX(quantity_processed) AS quantity_processed,
+                MAX(fg_num)             AS fg_num,
+                MIN(job_start_time)       AS job_start_time,
+                MAX(operator_name)      AS operator_name,
+                MAX(machine_name)       AS machine_name,
+                MAX(process_name)       AS process_name
+           FROM production_records
+          WHERE po_num = ?
+          GROUP BY batch_num
           ORDER BY batch_num ASC`,
         [po]
     );
@@ -2160,6 +2218,7 @@ module.exports = {
     insertJobActivities,
     getActivitiesByBatchNum,
     getBatchesByPO,
+    sumCompletedQtyByPO,
     getEmbossingQuantitiesByPO,
     getJobSummary,
     getShiftSummary,

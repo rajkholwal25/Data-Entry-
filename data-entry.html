@@ -13,7 +13,7 @@
     <title>VK Global Digital - Production Tracking</title>
     <meta name="description" content="VK Global Digital - Machine-specific production tracking and job management">
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect fill='%231e40af' width='100' height='100' rx='20'/%3E%3Ctext x='50' y='65' font-family='Arial' font-size='45' font-weight='bold' fill='white' text-anchor='middle'%3EVK%3C/text%3E%3C/svg%3E">
-    <link rel="stylesheet" href="data-entry.css?v=20260612a">
+    <link rel="stylesheet" href="data-entry.css?v=20260615r">
 </head>
 
 <body>
@@ -35,11 +35,14 @@
             </div>
         </div>
 
-        <!-- Center: PO Search -->
+        <!-- Center: Production Order search (SAP OWOR — not purchase order) -->
         <div class="header-center">
             <div class="po-search-container">
                 <span class="search-icon-small">🔍</span>
-                <input type="text" id="po-search-input" class="po-search-input" placeholder="Search PO Num...">
+                <input type="text" id="po-search-input" class="po-search-input"
+                    placeholder="Production Order #"
+                    title="SAP Production Order number (not Purchase Order)"
+                    aria-label="Production Order number">
                 <button id="po-search-btn" class="po-search-btn">Go</button>
             </div>
         </div>
@@ -487,8 +490,8 @@
     <script src="validation.js"></script>
     <script src="live-tracking.js"></script>
     <script src="node_modules/qrcode-generator/dist/qrcode.js"></script>
-    <script src="process-label-formats.js?v=20260615g"></script>
-    <script src="data-entry.js?v=20260612b"></script>
+    <script src="process-label-formats.js?v=20260615i"></script>
+    <script src="data-entry.js?v=20260616e"></script>
 </body>
 
 </html>

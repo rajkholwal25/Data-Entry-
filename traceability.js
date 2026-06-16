@@ -1,4 +1,5 @@
 // Material Traceability — embedded on home page (index.html)
+// PO in API/URL params = SAP Production Order (OWOR), not Purchase Order.
 
 (function initTraceability() {
     const poInput = document.getElementById('trace-po-input');
@@ -93,7 +94,7 @@
                 <td class="trace-qty">${i.issuedQty != null ? i.issuedQty : '—'}</td>
                 <td class="trace-qty">${remaining != null ? remaining : '—'}</td>
                 <td>${esc(i.inputType === 'process_batch'
-                    ? (i.sourcePoNum ? `PO ${i.sourcePoNum} output` : 'Prev. process output')
+                    ? (i.sourcePoNum ? `Prod. order ${i.sourcePoNum} output` : 'Prev. process output')
                     : (i.warehouse || 'Raw roll'))}</td>
                 <td class="trace-meta">${usedIn}</td>
             </tr>`;
@@ -129,13 +130,13 @@
         if (poView === 'inputs') {
             const items = poData.inputBatches || [];
             if (!items.length) {
-                resultsEl.innerHTML = '<div class="trace-empty">No input batches issued yet.<br>Issue material to this PO before running the job.</div>';
+                resultsEl.innerHTML = '<div class="trace-empty">No input batches issued yet.<br>Issue material to this production order before running the job.</div>';
                 return;
             }
             resultsEl.innerHTML = `
                 <div class="trace-group">
                     <div class="trace-group-head">
-                        <div><span class="trace-arrow">PO ${esc(poData.poNum)} →</span> <strong>Input Batches Issued</strong></div>
+                        <div><span class="trace-arrow">Prod. order ${esc(poData.poNum)} →</span> <strong>Input Batches Issued</strong></div>
                         <span class="trace-pill">${items.length} batch(es)</span>
                     </div>
                     <table class="trace-table">
@@ -155,7 +156,7 @@
 
         const outputs = poData.outputBatches || [];
         if (!outputs.length) {
-            resultsEl.innerHTML = '<div class="trace-empty">No output batches for this PO yet.</div>';
+            resultsEl.innerHTML = '<div class="trace-empty">No output batches for this production order yet.</div>';
             return;
         }
         const inputBatchMap = new Map(
@@ -213,9 +214,9 @@
                 const current = batchPoInput.value.trim();
                 if (!current) {
                     batchPoInput.value = json.ownerPo;
-                    statusEl.textContent = `Batch ${batch} belongs to PO ${json.ownerPo}${json.processName ? ` (${json.processName})` : ''} — PO filled automatically.`;
+                    statusEl.textContent = `Batch ${batch} belongs to production order ${json.ownerPo}${json.processName ? ` (${json.processName})` : ''} — order number filled automatically.`;
                 } else if (current !== json.ownerPo) {
-                    statusEl.textContent = `❌ This batch belongs to PO ${json.ownerPo}${json.processName ? ` (${json.processName})` : ''}, not PO ${current}.`;
+                    statusEl.textContent = `❌ This batch belongs to production order ${json.ownerPo}${json.processName ? ` (${json.processName})` : ''}, not ${current}.`;
                     resultsEl.innerHTML = '';
                 }
             }
@@ -228,7 +229,7 @@
         if (batchPoInput) batchPoInput.value = po;
         batchInput.value = batchNum;
         if (!po) {
-            statusEl.textContent = '⚠️ Please enter PO — batch trace needs PO number and batch number together.';
+            statusEl.textContent = '⚠️ Please enter production order — batch trace needs order number and batch number together.';
             resultsEl.innerHTML = '';
             poSummaryEl.classList.remove('visible');
             batchPoInput?.focus();
@@ -240,7 +241,7 @@
     async function runPOSearch() {
         const po = poInput.value.trim();
         if (!po) {
-            statusEl.textContent = 'Enter a PO number.';
+            statusEl.textContent = 'Enter a production order number.';
             return;
         }
         statusEl.textContent = 'Loading…';
@@ -255,7 +256,7 @@
             poSummaryEl.classList.add('visible');
             poView = 'outputs';
             const usedCount = (json.inputBatches || []).filter((b) => (b.totalQtyUsed || 0) > 0).length;
-            statusEl.textContent = `PO ${po}: ${(json.inputBatches || []).length} input batch(es) issued (${usedCount} used in production), ${(json.outputBatches || []).length} output batch(es).`;
+            statusEl.textContent = `Production order ${po}: ${(json.inputBatches || []).length} input batch(es) issued (${usedCount} used in production), ${(json.outputBatches || []).length} output batch(es).`;
             renderPOView();
         } catch (e) {
             statusEl.textContent = '❌ ' + (e.message || e);
@@ -266,7 +267,7 @@
         const batch = batchInput.value.trim();
         const po = batchPoInput?.value.trim() || '';
         if (!po) {
-            statusEl.textContent = '⚠️ Please enter PO — batch trace needs PO number and batch number together.';
+            statusEl.textContent = '⚠️ Please enter production order — batch trace needs order number and batch number together.';
             batchPoInput?.focus();
             return;
         }
@@ -276,7 +277,7 @@
             return;
         }
 
-        // Resolve owning PO before search — batch must match the PO that produced it
+        // Resolve owning production order before search — batch must match the order that produced it
         let ownerPo = null;
         let ownerProcess = null;
         try {
@@ -288,7 +289,7 @@
         }
         if (ownerPo && ownerPo !== po) {
             const procHint = ownerProcess ? ` (${ownerProcess})` : '';
-            statusEl.textContent = `❌ This batch belongs to PO ${ownerPo}${procHint}, not PO ${po}. Use PO ${ownerPo} to trace this batch.`;
+            statusEl.textContent = `❌ This batch belongs to production order ${ownerPo}${procHint}, not ${po}. Use production order ${ownerPo} to trace this batch.`;
             resultsEl.innerHTML = '';
             batchPoInput.value = ownerPo;
             batchPoInput?.focus();
@@ -306,21 +307,21 @@
             if (!json.success) throw new Error(json.message || 'Failed');
             if (json.poNum && String(json.poNum) !== String(po)) {
                 throw new Error(
-                    `This batch belongs to PO ${json.poNum}, not PO ${po}. Use PO ${json.poNum} to trace this batch.`
+                    `This batch belongs to production order ${json.poNum}, not ${po}. Use production order ${json.poNum} to trace this batch.`
                 );
             }
             const resolvedPo = json.poNum || ownerPo || po;
             const inputs = json.inputs || [];
             statusEl.textContent = inputs.length
-                ? `PO ${resolvedPo}: ${inputs.length} input(s) used to produce ${batch}`
-                : `PO ${resolvedPo}: no report-completion inputs linked for ${batch}. Finish job with input selection.`;
+                ? `Production order ${resolvedPo}: ${inputs.length} input(s) used to produce ${batch}`
+                : `Production order ${resolvedPo}: no report-completion inputs linked for ${batch}. Finish job with input selection.`;
 
             const hero = `
                 <div class="trace-batch-hero">
                     <div class="trace-hero-title">Output Batch</div>
                     <div class="trace-hero-batch-id">${esc(json.outputBatch)}</div>
                     <div class="trace-hero-meta">
-                        ${resolvedPo ? `PO ${esc(resolvedPo)}` : ''}
+                        ${resolvedPo ? `Prod. order ${esc(resolvedPo)}` : ''}
                         ${json.outputQty != null ? ` · Output: <strong>${json.outputQty} KGS</strong>` : ''}
                         ${json.itemCode ? ` · Item: ${esc(json.itemCode)}` : ''}
                         ${json.completionOperator ? ` · Operator: <strong>${esc(json.completionOperator)}</strong>${json.completionMachine ? ` (${esc(json.completionMachine)})` : ''}` : ''}

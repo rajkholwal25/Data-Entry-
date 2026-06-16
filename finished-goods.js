@@ -235,7 +235,7 @@ async function handleSearch() {
     const poNumber = elements.poSearchInput?.value.trim();
     
     if (!poNumber) {
-        alert('Please enter a PO Number');
+        alert('Please enter a Production Order number');
         elements.poSearchInput?.focus();
         return;
     }
@@ -420,7 +420,7 @@ function populateFgInputDropdown() {
         if (selectedKeys.has(String(r.issue_id))) continue;
         const opt = document.createElement('option');
         opt.value = String(r.issue_id);
-        const poHint = r.source_po_num ? ` · PO ${r.source_po_num}` : '';
+        const poHint = r.source_po_num ? ` · Prod. order ${r.source_po_num}` : '';
         opt.textContent = `${r.batch_number}${poHint} — avail ${formatKgsDisplay(r.remaining_qty)}${currentInventoryUOM ? ` ${currentInventoryUOM}` : ' KGS'}`;
         sel.appendChild(opt);
         added++;
@@ -430,7 +430,7 @@ function populateFgInputDropdown() {
         emptyOpt.value = '';
         emptyOpt.textContent = fgInputRoles.length
             ? 'All inputs fully used'
-            : 'No batches from last process — issue material to this FG PO first';
+            : 'No batches from last process — issue material to this production order first';
         emptyOpt.disabled = true;
         sel.appendChild(emptyOpt);
     }
@@ -655,7 +655,7 @@ function showConfirmModal(formData) {
     // Build confirmation HTML
     const confirmHTML = `
         <div class="confirm-item">
-            <span class="confirm-label">PO Number</span>
+            <span class="confirm-label">Production Order</span>
             <span class="confirm-value highlight">${currentJobData?.jobNumber || '-'}</span>
         </div>
         <div class="confirm-item">
@@ -827,7 +827,7 @@ function showSuccess(payload, result) {
     
     if (elements.successDetails) {
         elements.successDetails.innerHTML = `
-            <div><strong>PO Number:</strong> ${payload.poNumber}</div>
+            <div><strong>Production Order:</strong> ${payload.poNumber}</div>
             <div><strong>FG Quantity${currentInventoryUOM ? ` (${currentInventoryUOM})` : ''}:</strong> ${formatQty(payload.fgQuantity)}</div>
             <div><strong>QC Supervisor:</strong> ${payload.qcSupervisor}</div>
             <div><strong>Operator:</strong> ${payload.operatorName}</div>

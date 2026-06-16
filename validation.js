@@ -355,11 +355,11 @@ function validateStateChange(data) {
 function validateRequiredFields(data) {
     const result = new ValidationResult();
 
-    // DATA_001: PO Number required
+    // DATA_001: Production Order number required (SAP OWOR DocumentNumber)
     if (!data.poNumber && !data.po_num && !data.jobNumber) {
         result.addError(
             'DATA_001',
-            'PO Number is required',
+            'Production Order number is required',
             'poNumber'
         );
     }
@@ -407,8 +407,8 @@ function validateNumericField(value, fieldName) {
 }
 
 /**
- * Check for duplicate PO in queue
- * @param {string} poNumber - PO number to check
+ * Check for duplicate production order in queue
+ * @param {string} poNumber - SAP production order document number
  * @param {Array} currentJobs - Current job queue
  * @returns {ValidationResult}
  */
@@ -422,7 +422,7 @@ function validateDuplicatePO(poNumber, currentJobs) {
     if (existing) {
         result.addWarning(
             'DATA_004',
-            `PO ${poNumber} is already in the queue. Add another instance?`,
+            `Production order ${poNumber} is already in the queue. Add another instance?`,
             'poNumber'
         );
     }

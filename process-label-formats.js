@@ -191,7 +191,7 @@
     function renderStandardProcessLabel(data) {
         const batchCode = data.barcodeDisplay || data.batchNo || data.barcodeValue || '';
         const barcodeValue = data.barcodeValue || batchCode;
-        const barcodeSvg = barcodeValue ? renderCode39Svg(barcodeValue) : '';
+        const qrSvg = barcodeValue ? renderQrSvg(barcodeValue) : '';
         const poDisplay = data.poNo || data.jobNo || '—';
         return `
         <div class="label-page">
@@ -214,10 +214,6 @@
                     <col class="col-k"><col class="col-v"><col class="col-barcode">
                   </colgroup>
                   <tr>
-                    <td class="k">Customer Name</td>
-                    <td class="v" colspan="2">${escapeHtml(data.customerName || '—')}</td>
-                  </tr>
-                  <tr>
                     <td class="k">Item Description</td>
                     <td class="v" colspan="2">${escapeHtml(data.itemDescription)}</td>
                   </tr>
@@ -230,8 +226,8 @@
                     <td class="v">${escapeHtml(poDisplay)}</td>
                     <td class="barcode-cell" rowspan="5">
                       <div class="sap-barcode-title">Batch No</div>
-                      <div class="sap-barcode">
-                        ${barcodeSvg}
+                      <div class="sap-barcode sap-qr">
+                        ${qrSvg}
                         <div class="code-text">${escapeHtml(batchCode)}</div>
                       </div>
                     </td>
